@@ -9,7 +9,7 @@ docker compose exec controller node src/admin.ts admin owner@example.org
 
 Open `http://localhost:3000`. In the passkey registration form, enter your email and the one-time code from the terminal. Confirm creation of the key on your device. Subsequent sign-ins use the passkey without asking for an email address. [Registration and recovery](passkeys.md)
 
-Choose `call` in the panel and send the following request. It creates a stopped APP directly under the workspace. The example script is included in the image.
+Open **Консоль RPC** in the panel menu, choose `call` and send the following request. It creates a stopped APP directly under the workspace. The example script is included in the image.
 
 ```json
 {

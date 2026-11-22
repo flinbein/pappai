@@ -14,6 +14,8 @@ The controller owns the node tree, permissions, queues and call state. A runner 
 
 Run `npm ci`, `npm run typecheck` and `npm test` to check the server-side TypeScript and local scenarios. Enable Linux bubblewrap tests with `PAPPAI_TEST_BWRAP=1` on a host that allows the required namespaces. Run `node tests/browser-acceptance.mjs` to check the local Docker build in Chromium with a virtual authenticator. Set `PAPPAI_CHROME_BIN` to provide the browser path if necessary.
 
+The optional Codex browser scenario uses a real runner and CLI with a local model response fixture. Before running `node tests/browser-acceptance.mjs`, set `PAPPAI_BROWSER_RUNNER_MODULES` to a host `node_modules` directory containing the installed runner and its dependencies, and `PAPPAI_BROWSER_CODEX_DIST` to the native Linux musl distribution directory containing `bin/codex`. Docker mounts both read-only. The test registers the runner, creates a TEAM and PROFILE, imports synthetic credentials, grants an APP access, sends a message and reads its history through the panel.
+
 ## Protocols
 
 - [Runner registry](runners/registry.md)

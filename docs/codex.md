@@ -2,6 +2,17 @@
 
 Install the [runner package and CLI distribution](https://github.com/flinbein/pappai-runner-codex#installation). Register the runner on the workspace with `$.runners.add`, which requires unrestricted permissions. Mount a dedicated persistent volume at `/run/pappai/private` for profile credentials and runner state.
 
+## From the web panel
+
+1. Open **Раннеры** (Runners). If `codex` is already available, continue to the tree. Otherwise choose **Добавить раннер**, check the installed entrypoint and native CLI paths, and register it. Registration starts the installed runner.
+2. Select the workspace in the tree. Choose **Создать ноду**, select **TEAM**, and give it a name. The panel selects the new team. Create a **PROFILE** inside it.
+3. In the profile, enter the server-side path of your prepared Codex `auth.json` and choose **Импортировать авторизацию Codex**. The path is resolved using your signed-in user's filesystem permissions.
+4. Select the TEAM again and create **APP · Codex**. Choose the PROFILE you created. This template declares a persistent agent with message, history and interrupt methods. The permissions editor defaults to `[]`; model authentication is sufficient for a simple conversation. Grant workspace permissions separately when the agent needs tools.
+5. Return to the PROFILE. Choose the new APP in the scope dropdown, save the scope, then enable the profile. The dropdown appends the selected ID to the rules shown in the editor.
+6. Select the APP, choose **Запустить**, then enter a message and choose **Отправить сообщение**. The reply appears below the composer. To read earlier messages, open **Методы и справка**, choose `agent.getHistory`, and call it with `{}`.
+
+## Equivalent method calls
+
 | Target | Method | Arguments |
 |---|---|---|
 | Workspace or TEAM | `$.profile.create` | `{"name":"shared","permissions":null}` |

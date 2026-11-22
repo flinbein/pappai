@@ -6,6 +6,7 @@ import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { chromium } from "playwright-core";
+import { exerciseCodexPanel } from "./browser-codex.mjs";
 
 // Run explicitly from a host with Docker and Chrome. The test owns the container and its data.
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -62,6 +63,7 @@ async function terminal(panel, sandbox, link = 'Открыть терминал'
   return {page, command};
 }
 async function rpc(page, operation, params, expectedError) {
+  await page.locator("#nav-rpc").click();
   await page.locator("#operation").selectOption(operation);
   await page.locator("#params").fill(JSON.stringify(params));
   const response = page.waitForResponse(r=>r.url().endsWith("/rpc") && r.request().postDataJSON().method === operation);
@@ -89,7 +91,11 @@ function volume(suffix) {
   return name;
 }
 function startInstallation(platform, workspace) {
+  const runnerModules = process.env.PAPPAI_BROWSER_RUNNER_MODULES;
+  const codexDist = process.env.PAPPAI_BROWSER_CODEX_DIST;
+  assert.equal(!!runnerModules, !!codexDist, "Set both Codex fixture paths");
   docker("run","-d","--name",runId,"--cap-add","SYS_ADMIN","--security-opt","seccomp=unconfined",
+    ...(runnerModules ? ["-v",runnerModules+":/installed/node_modules:ro","-v",codexDist+":/code-dist:ro"] : []),
     "-v",platform+":/var/lib/pappai","-v",workspace+":/workspace",
     "-e","HOST=0.0.0.0","-e","PAPPAI_ORIGIN="+origin,"-p",`127.0.0.1:${port}:8080`,runId);
   containerCreated = true;
@@ -111,6 +117,10 @@ try {
   await admin.locator("#logout").click();
   await admin.locator("#login").click();
   await admin.locator("#workspace").waitFor({state:"visible"});
+  if (process.env.PAPPAI_BROWSER_CODEX_DIST) {
+    await exerciseCodexPanel(admin, (...args) => docker("exec",runId,...args),
+      (...args) => docker("exec","-d",runId,...args));
+  }
   const call = (node,method,data)=>rpc(admin,"call",{node,method,data});
   const {id:team} = await call("~","$.team.create",{name:"Acceptance",permissions:null});
   const userEmail = "limited@example.test";
@@ -130,6 +140,7 @@ try {
   await rpc(limited,"call",{node:app,method:"$.app.manifest.get"},/Permission denied/);
   await admin.getByRole('button',{name:'Extract',exact:true}).click({timeout:3000});
   const management = admin.locator('#app-management');
+  await management.locator('#manifest-details summary').click();
   const editor = management.getByLabel('Источник манифеста JSON');
   const delayed = structuredClone(manifest);
   delayed.run.settings.args = ['-e', `process.stdin.once('data',bytes=>{
