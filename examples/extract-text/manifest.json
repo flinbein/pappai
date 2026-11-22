@@ -8,7 +8,7 @@
       "features": {
         "message.extractText": {
           "type": "method",
-          "description": "Убрать пробелы по краям текста",
+          "description": "Trim leading and trailing whitespace",
           "version": "1",
           "schema": {
             "input": {

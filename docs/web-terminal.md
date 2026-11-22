@@ -1,9 +1,9 @@
-# Веб-терминал
+# Web terminal
 
-Войдите в панель и нажмите **Открыть терминал**. В отдельной вкладке откроется интерактивный `/bin/sh` внутри Linux-контейнера pappai. Повторное нажатие открывает независимую оболочку. Размер терминала меняется вместе с окном. Можно пользоваться стрелками, Ctrl+C и интерактивными консольными программами.
+Sign in and open the terminal from the panel. Each tab opens an independent interactive `/bin/sh` inside the Linux container. The terminal follows the window size and supports arrow keys, Ctrl+C and interactive console programs.
 
-Режим указан в шапке. Если у USER или родительской TEAM задан массив пермитов, терминал работает в bubblewrap с эффективными файловыми и сетевыми правами USER. Начальный каталог и `HOME` — личный `/tmp` пользователя, общий между его песочницами. При полной цепочке `permissions: null` обычный терминал открывается в `/root` с правами процесса pappai внутри контейнера. Для такого пользователя есть и ссылка **Открыть в песочнице**. Она запускает терминал с базовыми системными каталогами на чтение и личным `/tmp` на запись, без внешней сети.
+The header shows the execution mode. With a restricted permission chain, the terminal uses bubblewrap with the USER's effective file and network permissions. Its working directory and `HOME` are the user's private `/tmp`, shared between that user's sandboxes. With a fully trusted chain of `permissions: null`, the regular terminal starts in `/root` with the rights of the pappai process inside the container. The sandbox option for such users provides read-only base system directories, a writable private `/tmp` and no external network.
 
-Кнопка **Закрыть**, закрытие вкладки и обнаруженный обрыв соединения завершают терминал. В песочнице завершаются также фоновые процессы. В обычном терминале администратора отделённое задание с перенаправленными потоками, например `nohup команда </dev/null >журнал 2>&1 &`, может продолжить работу. Кнопка **Открыть новый** создаёт новую оболочку. Выход из панели закрывает терминалы этой веб-сессии.
+Closing the terminal or tab, or losing the connection, terminates the shell. In a sandbox this also terminates background processes. In an administrator's regular terminal, a detached job with redirected streams, such as `nohup command </dev/null >job.log 2>&1 &`, may continue running. Opening a new terminal creates a separate shell. Signing out closes terminals for that web session.
 
-Для файлов, которые должны пережить пересоздание контейнера, используйте подключённый постоянный том, например `/workspace`, и выдайте нужному USER права на его каталог. [Права рабочего пространства](workspace.md) · [Устройство терминала](dev/web-terminal.md)
+Keep files that must survive container replacement on a mounted persistent volume such as `/workspace`. Grant the USER access to the relevant directory. [Workspace permissions](workspace.md) · [Terminal internals](dev/web-terminal.md)

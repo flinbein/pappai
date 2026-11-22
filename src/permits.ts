@@ -197,6 +197,14 @@ export function fileLevel(rules: Permissions, path: string): number {
   return read ? (write ? 2 : 1) : 0;
 }
 
+export function networkAllowed(chains:Permissions[][]) {
+  return chains.some(chain=>chain.every(rules=>{
+    if (rules === null) return true;
+    const match=rules.find(rule=>rule.network);
+    return !!match && !match.deny;
+  }));
+}
+
 export function filesystemProfile(...subjects: Permissions[][][]) {
   if (subjects.every(chains => chains.some(chain => chain.every(r => r === null)))) return null;
   const anchors = new Set<string>(minimalPaths);
@@ -215,8 +223,6 @@ export function filesystemProfile(...subjects: Permissions[][][]) {
     levels.set(path,level);
     if (level !== inherited) (level === 2 ? write : level === 1 ? read : hide).push(path);
   }
-  const network = subjects.every(chains=>chains.some(chain => chain.every(rules =>
-    rules === null || rules.filter(r => r.network).slice(0,1).some(r => !r.deny))));
-  return {read,write,network,...(hide.length ? {hide} : {})};
+  return {read,write,network:subjects.every(networkAllowed),...(hide.length ? {hide} : {})};
 }
 export function sandboxFor(chain: Permissions[]) { return filesystemProfile([chain]); }

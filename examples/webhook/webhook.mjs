@@ -40,7 +40,7 @@ function receiveUpdate(req, res) {
       res.writeHead(400).end();
       return;
     }
-    // В этом примере обработка ограничена записью ID в лог APP.
+    // This example records the update ID in the APP log.
     console.error("Telegram update", update.update_id);
     res.writeHead(200).end("ok\n");
   });
@@ -56,8 +56,8 @@ const server = createServer((req, res) => {
   }
 });
 
-// Runner запускает процесс по первому событию в stdin.
-// Следующие строки читаются и не создают ещё один HTTP-сервер.
+// The first event on stdin starts the listener. Drain subsequent events
+// without creating another HTTP server.
 const input = createInterface({input: process.stdin});
 input.once("line", () => server.listen(socketPath));
 

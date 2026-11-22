@@ -1,15 +1,15 @@
-# Первый вызов метода
+# Make your first method call
 
-Для локальной сборки нужны Docker с поддержкой Linux-контейнеров, Compose и браузер с passkey. Из корня репозитория выполните:
+You need Docker with Linux containers, Compose and a browser with passkey support. Run these commands from the repository root.
 
 ```sh
 docker compose up --build -d
 docker compose exec controller node src/admin.ts admin owner@example.org
 ```
 
-Откройте `http://localhost:3000`. В форме «Зарегистрировать passkey» введите email и одноразовый код из терминала, подтвердите создание ключа. При следующих посещениях доступен вход без ввода email. [Регистрация и восстановление](passkeys.md)
+Open `http://localhost:3000`. In the passkey registration form, enter your email and the one-time code from the terminal. Confirm creation of the key on your device. Subsequent sign-ins use the passkey without asking for an email address. [Registration and recovery](passkeys.md)
 
-В панели выберите `call`. Следующий запрос создаёт остановленную APP непосредственно в workspace. Готовый скрипт входит в образ.
+Choose `call` in the panel and send the following request. It creates a stopped APP directly under the workspace. The example script is included in the image.
 
 ```json
 {
@@ -21,7 +21,7 @@ docker compose exec controller node src/admin.ts admin owner@example.org
     "source": {"manifest": {
       "run": {"type":"process","settings":{
         "cwd":"/opt/pappai/examples/extract-text","command":"node","args":["extract.cjs"],
-        "features":{"message.extractText":{"type":"method","description":"Убрать пробелы по краям текста","version":"1","schema":{
+        "features":{"message.extractText":{"type":"method","description":"Trim leading and trailing whitespace","version":"1","schema":{
           "input":{"type":"object","required":["text"],"properties":{"text":{"type":"string"}},"additionalProperties":false},
           "output":{"type":"string"}
         }}}
@@ -32,15 +32,15 @@ docker compose exec controller node src/admin.ts admin owner@example.org
 }
 ```
 
-Скопируйте полученный `id` вместо `APP_ID` и выполните следующие запросы через ту же форму.
+Replace `APP_ID` with the returned `id` and submit these requests through the same form.
 
-| Операция | Параметры JSON | Результат |
+| Operation | JSON parameters | Result |
 |---|---|---|
-| `call` | `{"node":"APP_ID","method":"$.app.start"}` | APP переходит в `working` |
-| `dir` | `{}` | У видимой APP указан статус |
-| `help` | `{"node":"APP_ID","features":"message.**","schemas":"message.**"}` | Описание, версия и схема метода |
-| `call` | `{"node":"APP_ID","method":"message.extractText","version":"1","data":{"text":"  Привет  "}}` | Строка `"Привет"` |
+| `call` | `{"node":"APP_ID","method":"$.app.start"}` | The APP enters `working`. |
+| `dir` | `{}` | Visible APPs include their status. |
+| `help` | `{"node":"APP_ID","features":"message.**","schemas":"message.**"}` | Method description, version and schema. |
+| `call` | `{"node":"APP_ID","method":"message.extractText","version":"1","data":{"text":"  Hello  "}}` | The string `"Hello"`. |
 
-Создание TEAM или USER использует соответственно `$.team.create` или `$.user.create` на родителе. У USER укажите `name`, `email` и `permissions`. Запустите его через `$.app.start` и выдайте код командой `otp`. Для примера правила `[{"discover":true}]` разрешают просматривать ноды. Такой USER получит отказ на `message.extractText`. Проверьте его вход в отдельном профиле браузера.
+To create a TEAM or USER, call `$.team.create` or `$.user.create` on the parent. For a USER supply `name`, `email` and `permissions`. Start it with `$.app.start` and issue a code with the `otp` command. For example, `[{"discover":true}]` allows discovery but denies `message.extractText`. Try signing in as that USER in a separate browser profile.
 
-Команда `docker compose stop` останавливает локальную установку. Настройки и учётные записи хранятся в томе `platform`, пользовательские файлы — в томе `workspace`. Профиль Compose выдаёт контейнеру `SYS_ADMIN` и отключает внешний профиль seccomp для создания вложенных пространств имён bubblewrap. Это проверенный профиль локальной сборки. Публичная эксплуатация с минимальными привилегиями требует отдельной проверки конфигурации хоста.
+Run `docker compose stop` to stop the local installation. The `platform` volume stores settings and accounts. The `workspace` volume stores user files. The local Compose configuration grants the container `SYS_ADMIN` and disables the outer seccomp profile so bubblewrap can create nested namespaces. Validate the host configuration separately before deploying with least privilege.

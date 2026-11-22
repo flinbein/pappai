@@ -1,10 +1,10 @@
-# Постоянная APP с публичным webhook
+# A persistent APP with a public webhook
 
-Linux-контейнер включает [пример webhook](../examples/webhook/webhook.mjs) и его [файловый манифест](../examples/webhook/pappai-manifest.json). Процесс принимает HTTP через приватный Unix-сокет и проверяет секрет запроса. Для входящих запросов достаточно пермита `http:true`. Исходящие соединения требуют отдельного `network:true`.
+The Linux image includes a [webhook example](../examples/webhook/webhook.mjs) and its [file manifest](../examples/webhook/pappai-manifest.json). The process receives HTTP over a private Unix socket and checks a request secret. Incoming requests require `http:true`. Outbound connections require a separate `network:true` permission.
 
-Задайте контроллеру `PAPPAI_APP_HOST_TEMPLATE`, например `{name}.apps.example.org`. Настройте DNS, TLS и передачу исходного Host в обратном прокси для этих имён. Панель остаётся на отдельном хосте из `PAPPAI_ORIGIN`.
+Set `PAPPAI_APP_HOST_TEMPLATE` on the controller, for example `{name}.apps.example.org`. Configure DNS, TLS and original Host forwarding on the reverse proxy for those names. The panel uses its own host from `PAPPAI_ORIGIN`.
 
-В панели выберите операцию `call` и создайте APP из примера. Замените значение секрета своей строкой.
+Choose `call` in the panel and create the example APP. Replace the example secret with your own value.
 
 ```json
 {
@@ -26,7 +26,7 @@ Linux-контейнер включает [пример webhook](../examples/web
 }
 ```
 
-Откройте новую APP и нажмите **Запустить**. Манифест подписывает процесс на переход в `working`, восстановление контроллера и рестарт. По первому событию скрипт начинает слушать сокет. Проверьте адрес своей установки.
+Open and start the new APP. Its manifest subscribes to the transition to `working`, controller startup and APP restarts. The first event starts the socket listener. Test the address of your installation.
 
 ```sh
 curl https://telegram-demo.apps.example.org/healthz
@@ -35,14 +35,14 @@ curl https://telegram-demo.apps.example.org/webhook \
   -H 'Content-Type: application/json' -d '{"update_id":42}'
 ```
 
-Оба запроса возвращают `200 ok`. С неверным секретом webhook возвращает 403. При остановке, рестарте или до открытия сокета известного разрешённого имени прокси возвращает 503. HTTP-запрос сам по себе не запускает процесс. Каждое новое подключение после рестарта направляется в сокет нового исполнителя. При обрыве запроса клиент решает, можно ли повторить операцию.
+Both requests return `200 ok`. An incorrect webhook secret returns 403. For a known, permitted name the proxy returns 503 while the APP is stopped, restarting or still opening its socket. An HTTP request alone does not launch a process. New connections after restart go to the new executor's socket. If the connection drops, the client decides whether it can safely repeat the request.
 
-## Обновление пакета
+## Update a package
 
-Контроллер следит за одним цельным JSON-файлом. При каждом чтении он проверяет путь с правами конкретной APP. Для файла без `cwd` рабочим каталогом служит каталог манифеста. Относительный `cwd` в самом файле или в override отсчитывается оттуда же. Встроенному источнику требуется абсолютный `cwd`.
+The controller watches one self-contained JSON file. It checks the path with the APP's own permissions on each read. The manifest directory is the default working directory for a file source. Relative `cwd` in the file or override resolves against that directory. An inline source requires an absolute `cwd` for the process runner.
 
-В override доступны `run.settings.cwd`, `run.settings.env`, `subscriptions` и параметры `executors` — `poolSize`, `maxLifetimeMs` для одноразовых процессов, `idleTimeoutMs` и `maxRestarts` для постоянного. Список подписок override целиком заменяет список пакета. ENV сливается по именам, `null` убирает переменную. Значение `{"secret":true}` при сохранении оставляет ранее введённый секрет с тем же именем. При отсутствии этого имени в новом override его значение из override удаляется.
+Overrides support `run.settings.cwd`, `run.settings.env`, `subscriptions` and executor settings including `poolSize`, one-shot `maxLifetimeMs`, and persistent `idleTimeoutMs` and `maxRestarts`. The override subscription list replaces the package list. Environment variables merge by name. A value of `null` removes a variable. Saving `{"secret":true}` keeps the existing secret under that name. Omitting the name from the new override removes its override value.
 
-При корректном обновлении файла одноразовый пул сразу получает новый контракт. Постоянный процесс может принять локальное событие `$.app.manifest.sourceChanged` по действующим подпискам. До выхода или рестарта применяется предыдущая версия. Ошибка при чтении используемого файла прерывает работу APP. После исправления файла запустите её снова. Право устанавливать пакет из каталога включает доверие к будущим обновлениям издателя. Если установка делегирована через ограниченный пермит, укажите допустимый каталог, поля override и права создаваемой APP в схеме аргументов. Файловый путь такой установки должен обходиться без символических ссылок.
+A valid file update immediately changes the one-shot pool's contract. A persistent process can receive its local `$.app.manifest.sourceChanged` event through the active subscriptions. The previous manifest stays active until exit or restart. Failure to read the active file stops the APP. Correct the file and start the APP again. Granting permission to install from a directory includes trust in future changes by its publisher. For delegated installation, restrict the directory, allowed override fields and new APP permissions in the argument schema. Use paths without symbolic links for such installations.
 
-[Управление APP](manage-app.md) · [Устройство файлового источника и HTTP](dev/manifest-http.md)
+[Manage an APP](manage-app.md) · [File sources and HTTP routing](dev/manifest-http.md)

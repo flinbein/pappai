@@ -1,9 +1,9 @@
-# Устройство веб-терминала
+# Web terminal internals
 
-Страница `/terminal` загружает локальные xterm.js и FitAddon. Каждой вкладке соответствует один WebSocket на `/ws/terminal`. При upgrade контроллер проверяет Host, Origin, cookie действующей сессии и статус USER. Параметр `sandbox=1` разрешает только усилить изоляцию. Входящие данные проверяются на принадлежность действующей сессии. Logout закрывает её соединения, heartbeat проверяет срок действия сессии и обнаруживает потерю связи.
+The `/terminal` page loads local copies of xterm.js and FitAddon. Each tab opens one WebSocket to `/ws/terminal`. During upgrade, the controller checks the Host, Origin, active session cookie and USER status. The `sandbox=1` parameter can only tighten isolation. The controller verifies that incoming data belongs to an active session. Logging out closes that session's connections. A heartbeat checks session expiry and detects lost connections.
 
-Бинарные сообщения передают байты PTY в обе стороны. Текстовые сообщения клиента задают размер или подтверждают число байт, отрисованных xterm.js. До подтверждения контроллер может приостановить чтение PTY. Сообщения сервера в JSON сообщают режим или ошибку. История на сервере отсутствует.
+Binary messages carry PTY bytes in both directions. Client text messages set the terminal size or acknowledge the number of bytes xterm.js has rendered. The controller can pause PTY reads while waiting for acknowledgement. Server JSON messages report the mode or an error. The server keeps no terminal history.
 
-Контроллер запускает Python-мост с `pty.fork()`. В изолированном режиме мост создаёт управляющий PTY **внутри** нового PID namespace после настройки bubblewrap. Мост служит PID 1 и собирает завершившихся потомков. При отключении контроллер посылает SIGKILL процессу bubblewrap, а `--die-with-parent` уничтожает namespace. При прямом запуске мост завершает свою оболочку и закрывает PTY. Проблемы открытия выводятся в этой вкладке.
+The controller launches a Python bridge that uses `pty.fork()`. In sandboxed mode, the bridge creates the controlling PTY **inside** the new PID namespace after bubblewrap setup. The bridge runs as PID 1 and reaps children. On disconnect, the controller sends SIGKILL to bubblewrap, and `--die-with-parent` tears down the namespace. In direct mode the bridge terminates its shell and closes the PTY. Startup errors appear in the affected tab.
 
-Команда `node tests/browser-acceptance.mjs` проверяет вход по passkey, реальный PTY, resize, Ctrl+C, права USER, выход и судьбу отделённого задания в обоих режимах. [Инструкция пользователя](../web-terminal.md)
+Run `node tests/browser-acceptance.mjs` to check passkey sign-in, a real PTY, resizing, Ctrl+C, USER permissions, logout and what happens to a detached job in each mode. [User guide](../web-terminal.md)

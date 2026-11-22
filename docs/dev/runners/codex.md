@@ -1,25 +1,25 @@
-# Установка раннера Codex и CLI
+# Installing the Codex runner and CLI
 
-Внешний раннер находится в [pappai-runner-codex](https://github.com/flinbein/pappai-runner-codex) и поставляется как npm-пакет. Версии раннера и Codex CLI администратор выбирает независимо. [Первый запуск APP](../../codex.md)
+The external runner is distributed as an npm package from [pappai-runner-codex](https://github.com/flinbein/pappai-runner-codex). The administrator selects the runner and Codex CLI versions independently. [First Codex APP](../../codex.md)
 
-| Компонент | Где хранить в контейнере | Кто настраивает |
+| Component | Location in the container | Configuration |
 |---|---|---|
-| Пакет раннера и его зависимости | Например, `/run/pappai/private/runners/` на постоянном томе | Администратор регистрирует абсолютный путь к точке входа в [реестре](registry.md) |
-| Полный нативный дистрибутив Codex CLI | Например, `/run/pappai/private/tools/codex/<версия>/` на том же томе | Администратор задаёт абсолютный путь к нативному исполняемому файлу в `config.codexExecutablePath` |
-| Учётные данные, история и MCP | Раздельные закрытые каталоги `profilesDir` и `stateDir` внутри `/run/pappai/private/` | [PROFILE](profiles.md) предоставляет подключение, APP владеет своей историей |
+| Runner package and dependencies | For example, `/run/pappai/private/runners/` on a persistent volume | The administrator registers the absolute entry point path in the [registry](registry.md). |
+| Complete native Codex CLI distribution | For example, `/run/pappai/private/tools/codex/<version>/` on the same volume | The administrator sets the absolute path to the native executable in `config.codexExecutablePath`. |
+| Credentials, history and MCP | Separate private `profilesDir` and `stateDir` directories under `/run/pappai/private/` | The [PROFILE](profiles.md) provides the connection. The APP owns its history. |
 
-Путь на постоянном томе переживает замену контейнера при повторном подключении тома к тому же пути. Обычный каталог образа, включая `/opt`, получает такое свойство только при отдельном монтировании. Дистрибутив нужно переносить целиком с поставляемыми ресурсами и утилитами. Для установки из npm сохраняют также обёртку и её платформенную зависимость, если точкой запуска выбрана обёртка.
+Files on a persistent volume survive container replacement when the volume is remounted at the same path. Ordinary image directories, including `/opt`, need a separate mount for this. Copy the complete distribution with its bundled resources and utilities. If an npm installation uses the wrapper as its entry point, keep the wrapper and its platform dependency as well.
 
-Поле `config` передаётся при регистрации, сохраняется в SQLite и при каждом старте доставляется только доверенному хосту раннера. Исполняемые файлы, конфигурацию и их родительские каталоги должен контролировать администратор. Обновить конфигурацию можно через `$.runners.restart({name,config})`. Том, смонтированный в `/run/pappai/private`, должен быть недоступен ограниченным исполнителям по другим путям.
+The controller stores the `config` supplied at registration in SQLite and delivers it only to the trusted runner host on each start. The administrator must control the executables, configuration and their parent directories. Update the configuration through `$.runners.restart({name,config})`. Restricted workers must have no alternate path to the volume mounted at `/run/pappai/private`.
 
-## Обновление
+## Upgrade
 
-1. Установить раннер или полный CLI в новый версионный каталог. Сохранить предыдущий комплект до завершения проверки.
-2. В целевом образе запустить выбранный CLI по абсолютному пути, проверить `--version` и обмен `initialize` с `codex app-server`. Изменения CLI могут потребовать повторной проверки MCP и песочницы.
-3. Переключить административный путь и перезапустить раннер через `$.runners.restart`. При откате вернуть путь к предыдущей совместимой версии и повторить перезапуск.
+1. Install the runner or complete CLI in a new versioned directory. Keep the previous installation until verification is complete.
+2. In the target image, run the selected CLI by its absolute path. Check `--version` and the `initialize` exchange with `codex app-server`. CLI changes may require another check of MCP and sandbox behavior.
+3. Switch the administrative path and restart the runner through `$.runners.restart`. To roll back, restore the path to the previous compatible version and restart again.
 
-## Что проверено
+## Verification
 
-На Alpine Linux x86_64 с Codex CLI 0.170.0 [сквозной тест](../../../tests/codex-package.test.ts) устанавливает собранный архив, регистрирует раннер, импортирует доступный пользователю файл авторизации, задаёт `scope` и вызывает методы APP. Проверяются выходная JSON Schema одноразового агента, восстановление истории постоянного после рестарта и ответы контроллера на разрешённые и запрещённые действия.
+On Alpine Linux x86_64 with Codex CLI 0.170.0, the [end-to-end test](../../../tests/codex-package.test.ts) installs the packaged archive, registers the runner, imports a credentials file accessible to the caller, sets `scope` and invokes APP methods. It checks a one-shot agent's output JSON Schema, restoration of a persistent agent's history after restart, and controller responses to permitted and denied operations.
 
-В [проверке истории](../../../tests/probes/codex-sessions/README.md) два app-server использовали общую тестовую авторизацию Codex и раздельные каталоги состояния. После пересоздания контейнера каждый восстановил свой диалог и продолжил его с прежним контекстом. Даже при известном ID открыть чужой диалог через `thread/resume` не удалось. Проверка использует локальную модель-имитатор и авторизацию API-ключом. Защита файлов от прямого чтения командами APP проверяется отдельно при интеграции.
+In the [session history probe](../../../tests/probes/codex-sessions/README.md), two app-servers shared test Codex credentials and used separate state directories. After container recreation, each resumed its own conversation with its previous context. Even with the other thread's ID, `thread/resume` could not open it. The probe uses a local mock model and API-key authentication. Integration tests separately check that APP commands cannot read the other worker's files directly.

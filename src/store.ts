@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
-import { allowsAtLevel, filesystemProfile, fileLevel, selectsNode, validNodes, validateSchemaSelector, validatePermissions } from './permits.ts';
+import { allowsAtLevel, filesystemProfile, fileLevel, networkAllowed, selectsNode, validNodes, validateSchemaSelector, validatePermissions } from './permits.ts';
 import type { Capability, NodeType, Permissions, Rule } from './permits.ts';
 
 export type NodeStatus = 'stopped' | 'working' | 'stopping' | 'error';
@@ -219,9 +219,10 @@ export class Store {
   isAdmin(actorId: string): boolean {
     const actor = this.get(actorId);
     if (!activeCaller(actor)) return false;
-    const full=(subject:NodeRecord)=>this.paths(subject).some(chain=>chain.every(n=>n.permissions===null));
-    try { const profile=this.profileFor(actor); return full(actor) && (!profile || full(profile)); }
-    catch { return false; }
+    try {
+      this.profileFor(actor);
+      return this.paths(actor).some(chain=>chain.every(n=>n.permissions===null));
+    } catch { return false; }
   }
 
   private filePolicies(node: NodeRecord, actor = node) {
@@ -230,14 +231,19 @@ export class Store {
       selectsNode(rule,this.chain(owner).map(n=>n.id),ids,actor.type,actor.id,this.member)) ?? null));
   }
 
-  private effectiveFilePolicies(node:NodeRecord) {
-    const profile = this.profileFor(node);
-    return [this.filePolicies(node), ...(profile ? [this.filePolicies(profile,node)] : [])];
+  profileMcpNetwork(app:NodeRecord, appNetwork:boolean) {
+    const profile=this.profileFor(app);
+    return !!profile && appNetwork && networkAllowed(this.filePolicies(profile,app));
+  }
+
+  private principalFilePolicies(id:string) {
+    const node=this.get(id);
+    if (!node || (node.type !== 'app' && node.type !== 'user')) throw Error('Unknown filesystem principal');
+    this.profileFor(node);
+    return this.filePolicies(node);
   }
   sandbox(nodeId: string) {
-    const node = this.get(nodeId);
-    if (!node || (node.type !== 'app' && node.type !== 'user')) throw Error('Unknown APP or USER');
-    return filesystemProfile(...this.effectiveFilePolicies(node));
+    return filesystemProfile(this.principalFilePolicies(nodeId));
   }
 
   allowsFile(actorId: string, path: string, write = false) {
@@ -245,16 +251,14 @@ export class Store {
   }
 
   fileSnapshot(actorId:string) {
-    const node=this.get(actorId);
-    if (!node || !['user','app'].includes(node.type)) throw Error('Unknown filesystem principal');
-    const subjects=this.effectiveFilePolicies(node);
-    const sandbox=filesystemProfile(...subjects);
+    const policies=this.principalFilePolicies(actorId);
+    const sandbox=filesystemProfile(policies);
     const allows=(path:string,write=false) => {
       if (!path.startsWith('/') || path.includes('\0') || path.split('/').some(p=>p==='.' || p==='..')) return false;
       if (path==='/tmp' || path.startsWith('/tmp/')) return true;
       if (!sandbox) return true;
       if (['/proc','/dev','/sys','/run'].some(p=>path===p || path.startsWith(p+'/'))) return false;
-      return subjects.every(paths=>paths.some(chain=>chain.every(rules=>fileLevel(rules,path)>=(write?2:1))));
+      return policies.some(chain=>chain.every(rules=>fileLevel(rules,path)>=(write?2:1)));
     };
     return {sandbox,allows};
   }
@@ -263,11 +267,12 @@ export class Store {
     const actor = this.get(actorId), target = this.get(targetId);
     if (!actor || (!(live && actor.type==='app') && !(recovery && actor.type==='user' && actorId===targetId) && !activeCaller(actor)) || !target) return false;
     const targets = this.chain(target).map(n=>n.id);
-    const allowed=(subject:NodeRecord)=>this.paths(subject).some(chain=>chain.every(owner=>allowsAtLevel(owner.permissions,
-      this.chain(owner).map(n=>n.id),targets,target.type,actorId,method,capability,data,
-      (selector,types)=>this.resolveNodes(owner.id,selector,types),this.member)));
-    try { const profile=this.profileFor(actor); return allowed(actor) && (!profile || allowed(profile)); }
-    catch { return false; }
+    try {
+      this.profileFor(actor);
+      return this.paths(actor).some(chain=>chain.every(owner=>allowsAtLevel(owner.permissions,
+        this.chain(owner).map(n=>n.id),targets,target.type,actorId,method,capability,data,
+        (selector,types)=>this.resolveNodes(owner.id,selector,types),this.member)));
+    } catch { return false; }
   }
   allowsLiveExecutor(actor:string,target:string,method:string,data?:unknown) {
     return this.permitted(actor,target,'methods',method,data,false,true);
@@ -362,7 +367,6 @@ export class Store {
     for(const node of index.values()) {
       const chain=lineage(node,lookup), ids=chain.map(n=>n.id);
       if(!owners.some(path=>path.every(o=>allowsAtLevel(o.rules,o.ids,ids,node.type,actorId,undefined,'discover',undefined,undefined,this.member)))) continue;
-      if (actor.profile && !this.canDiscover(actorId,node.id)) continue;
       for(const n of chain.reverse()) if(!entries.has(n.id)) {
         const {id,parentId,type,name,status}=n;
         entries.set(id,{id,parentId,type,name,...(['app','user'].includes(type)?{status}:{})});

@@ -6,7 +6,7 @@ import test from 'node:test';
 import { Store } from '../src/store.ts';
 import { createService } from '../src/server.ts';
 
-test('profile membership gates first launch and limits both filesystem and method permits', async t=>{
+test('profile membership gates launch while ordinary capabilities and files use the APP permits', async t=>{
   const db=new DatabaseSync(':memory:');
   const service=createService({db,origin:'http://localhost'});
   t.after(async ()=>{await service.close();db.close();});
@@ -25,11 +25,21 @@ test('profile membership gates first launch and limits both filesystem and metho
   await call(admin.id,profile,'$.profile.scope.set',{scope:[app]});
   await call(admin.id,app,'$.app.start');
   assert.equal(store.allows(app,app,'echo'),true);
-  assert.equal(store.allows(app,app,'root'),false);
-  assert.equal(store.isAdmin(app),false);
+  assert.equal(store.allows(app,app,'root'),true);
+  assert.equal(store.isAdmin(app),true);
+  assert.equal(store.hasHttp(app),true);
+  assert.equal(store.allowsEvent(app,admin.id,'notice'),true);
+  assert.equal(store.allowsDelivery(app,admin.id),true);
+  assert.ok(store.visible(app).some(entry=>entry.id===admin.id));
   assert.equal(store.allowsFile(app,'/work/file'),true);
-  assert.equal(store.allowsFile(app,'/work/file',true),false);
-  assert.equal(store.sandbox(app).network,false);
+  assert.equal(store.allowsFile(app,'/work/file',true),true);
+  assert.equal(store.sandbox(app),null);
+  await call(admin.id,app,'$.node.permissions.set',{permissions:[{methods:'other',write:'/app-only',network:true}]});
+  assert.equal(store.isAdmin(app),false);
+  assert.equal(store.allows(app,app,'echo'),false);
+  assert.equal(store.allowsFile(app,'/work/file'),false);
+  assert.equal(store.fileSnapshot(app).allows('/app-only/file',true),true);
+  assert.deepEqual(store.sandbox(app),{read:[],write:['/app-only'],network:true});
   await call(admin.id,app,'$.app.manifest.set',{source:{manifest}});
   assert.equal(store.get(app).profile,profile);
   const reopened=new Store(db);
@@ -57,6 +67,7 @@ test('revoked profile stops a reserved persistent executor before its first deli
   const [job]=jobs;
   assert.equal(job.holdFirst,true);
   assert.equal(job.profileId,profile.id);
+  assert.equal(job.profileMcpNetwork,true);
   assert.deepEqual(job.outputSchema,{type:'integer'});
   await call(profile.id,'$.profile.scope.set',{scope:[]});
   assert.equal(store.get(app.id).status,'error');
@@ -66,6 +77,57 @@ test('revoked profile stops a reserved persistent executor before its first deli
   runner.emit('exit',{id:job.id,appId:app.id});
   await assert.rejects(reply);
   assert.equal(jobs.length,1);
+});
+
+test('profile HTTP MCP uses both network permits and revalidates running assignments', async t=>{
+  const db=new DatabaseSync(':memory:'); t.after(()=>db.close());
+  const store=new Store(db), owner=store.ensureAdmin('network@example.test');
+  const profile=store.create('~','profile',{name:'shared',scope:[true]});
+  store.manage(owner.id,profile.id,'$.profile.enable',{});
+  const servers={local:{url:'https://local.example.test/mcp'}};
+  const makeApp=(type,settings)=>store.create('~','app',{name:type,permissions:null,profile:profile.id,
+    manifest:{run:{type,settings:{...settings,features:{go:{type:'method',version:'1',description:'go'}}}},
+      executors:{mode:'oneShot'}}});
+  const agent=makeApp('codex-alias',{mcp:{profile:['shared'],servers}});
+  const local=makeApp('codex',{mcp:{servers}});
+  const processApp=makeApp('process',{command:'test',cwd:process.cwd()});
+  for (const app of [agent,local,processApp]) store.setStatus(app.id,'working');
+  const jobs=[],stops=[];
+  const runner=Object.assign(new EventEmitter(),{dispatch:job=>jobs.push(job),stop:id=>stops.push(id),deliver(){}});
+  const controller=new Controller(store,runner);
+  const call=(node,method,data={})=>controller.call(owner.id,{node,method,data,timeoutMs:2000});
+  const go=async node=>{
+    const pending=call(node,'go');
+    const job=jobs.at(-1);
+    runner.emit('started',job);
+    runner.emit('written',{...job,workerId:job.id});
+    runner.emit('reply',{...job,result:'ok'});
+    assert.equal(await pending,'ok');
+    return job;
+  };
+  const denied=await go(agent.id);
+  assert.equal(denied.profileMcpNetwork,false);
+  assert.equal(denied.sandbox,null);
+  assert.deepEqual(denied.settings.mcp.servers,servers);
+  assert.deepEqual(denied.settings.mcp.profile ?? [],[]);
+  runner.emit('exit',denied);
+  const proc=await go(processApp.id), localJob=await go(local.id);
+  // The profile grants network only when used by this APP.
+  await call(profile.id,'$.node.permissions.set',{permissions:[{node:agent.id,network:true}]});
+  const enabled=await go(agent.id);
+  assert.equal(enabled.profileMcpNetwork,true);
+  assert.deepEqual(enabled.settings.mcp.profile,['shared']);
+  await call(profile.id,'$.node.permissions.set',{permissions:[{network:true}]});
+  assert.deepEqual(stops,[]);
+  await call(profile.id,'$.node.permissions.set',{permissions:[]});
+  assert.deepEqual(stops,[enabled.id]);
+  for (const job of [proc,localJob,enabled]) runner.emit('exit',job);
+  await call(profile.id,'$.node.permissions.set',{permissions:null});
+  await call(agent.id,'$.node.permissions.set',{permissions:[]});
+  const offline=await go(agent.id);
+  assert.equal(offline.profileMcpNetwork,false);
+  assert.equal(offline.sandbox.network,false);
+  runner.emit('exit',offline);
 });
 
 test('upgrading a version one database preserves nodes and foreign-key dependents', t=>{
@@ -87,11 +149,11 @@ test('upgrading a version one database preserves nodes and foreign-key dependent
   assert.equal(store.create('~','profile',{name:'new'}).type,'profile');
 });
 
-test('profile revocation invalidates its file view and normal graceful stop retains method rights', async t=>{
+test('profile revocation invalidates its file view and normal graceful stop retains APP method rights', async t=>{
   const db=new DatabaseSync(':memory:'); t.after(()=>db.close());
   const store=new Store(db);
   const owner=store.ensureAdmin('graceful@example.test');
-  const profile=store.create('~','profile',{name:'authority',permissions:null,scope:[true]});
+  const profile=store.create('~','profile',{name:'authority',permissions:[],scope:[true]});
   store.manage(owner.id,profile.id,'$.profile.enable',{});
   const manifest={run:{type:'fixture',settings:{features:{go:{type:'method',version:'1',description:'go'}}}},executors:{mode:'oneShot'}};
   const from=store.create('~','app',{name:'caller',profile:profile.id,permissions:null,manifest});
@@ -107,7 +169,7 @@ test('profile revocation invalidates its file view and normal graceful stop reta
   await call(from.id,'$.app.stop');
   runner.emit('request',{appId:from.id,workerId:first.id,id:'r',method:'call',params:{node:to.id,method:'go',data:{}}});
   const target=jobs[1];
-  assert.ok(target,'already running executor retains APP + PROFILE method authorization during ordinary stop');
+  assert.ok(target,'already running executor retains APP method authorization during ordinary stop');
   runner.emit('reply',{...target,result:'ok'});
   await new Promise(resolve=>setImmediate(resolve));
   assert.equal(responses[0].result,'ok');

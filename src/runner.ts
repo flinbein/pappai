@@ -8,7 +8,7 @@ export type ProcessSettings = RunnerSettings & {cwd:string;command:string;args?:
 export type Assignment<Settings extends RunnerSettings = RunnerSettings> = {
   appId: string; id: string; from: string; method?: string; event?:string; data: unknown; subscription?:string;
   settings: Settings;
-  profileId?: string; outputSchema?:unknown;
+  profileId?: string; profileMcpNetwork?: boolean; outputSchema?:unknown;
   sandbox: Sandbox; maxLifetimeMs?: number; mode?: 'oneShot'|'persistent'; runnerType?:string;
   holdFirst?: boolean;
   runtimeMounts?:Array<{source:string;target:string;readonly:boolean}>;

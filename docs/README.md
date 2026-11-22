@@ -1,18 +1,18 @@
-# Вики pappai
+# pappai wiki
 
-В pappai можно объединять приложения и агентов в команды, ограничивать их права и настраивать взаимодействие через события и методы. Вики предназначена и для пользователя, и для агента, который настраивает рабочее пространство от его имени.
+Use this guide to configure a workspace for applications and agents. Permissions control which operations each participant may perform. Methods and events let participants communicate.
 
-| Задача | Страница |
+| Task | Guide |
 |---|---|
-| Остановить APP, проверить очередь или заменить манифест | [Управление APP](manage-app.md) |
-| Открыть shell контейнера под правами USER | [Веб-терминал](web-terminal.md) |
-| Запустить контейнер и вызвать первый метод из панели | [Первый вызов](first-call.md) |
-| Получить код для регистрации passkey или восстановить администратора | [Учётные записи](passkeys.md) |
-| Понять, где создать APP, кому выдавать права и как выбрать режим работы | [Рабочее пространство и APP](workspace.md) |
-| Подписаться на события и связать два процесса | [Обмен между APP](app-exchange.md) |
-| Запустить постоянный сервис с публичным адресом | [Вебхуки](webhook.md) |
-| Передать файл вместе с вызовом | [Делегирование доступа](delegated-files.md) |
-| Просмотреть файлы от имени USER | [Файловый интерфейс](user-files.md) |
-| Настроить пермиты и членство | [Права](permissions.md) |
-| Подключить профиль Codex и запустить первое поручение | [APP с Codex](codex.md) |
-| Разобраться в устройстве платформы или написать раннер | [Документация разработчика](dev/README.md) |
+| Build the container and call a method from the panel | [First call](first-call.md) |
+| Register a passkey or recover administrator access | [Accounts and recovery](passkeys.md) |
+| Choose a team, runner and execution mode | [Workspace and APPs](workspace.md) |
+| Stop an APP, inspect its queue or replace its manifest | [Manage an APP](manage-app.md) |
+| Configure permissions and team membership | [Permissions](permissions.md) |
+| Subscribe to events and connect two processes | [Events and calls](app-exchange.md) |
+| Start a persistent service with a public endpoint | [Webhooks](webhook.md) |
+| Pass a file with a method call | [Delegated file access](delegated-files.md) |
+| Browse files as a USER | [File browser](user-files.md) |
+| Open a container shell as a USER | [Web terminal](web-terminal.md) |
+| Configure a Codex profile and run a task | [Codex APPs](codex.md) |
+| Work on the controller or build a runner | [Developer guide](dev/README.md) |

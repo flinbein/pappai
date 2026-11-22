@@ -1,7 +1,7 @@
-# План разработки
+# Development roadmap
 
-Реализованы [обмен между APP](../app-exchange.md), [постоянный сервис с вебхуком](../webhook.md), [делегирование файлов](../delegated-files.md), [членство и пермиты](../permissions.md), [почтовое восстановление](../passkeys.md) и [реестр раннеров](runners/registry.md).
+The platform supports [communication between APPs](../app-exchange.md), [persistent webhook services](../webhook.md), [delegated file access](../delegated-files.md), [membership and permissions](../permissions.md), [email recovery](../passkeys.md) and the [runner registry](runners/registry.md).
 
-[Профили раннеров](runners/profiles.md) и [внешний раннер Codex](runners/codex.md) поддерживают настройку профиля, одноразовый и постоянный режимы. Следующие этапы — веб-чат, OAuth подключений MCP и управляемые stdio-серверы.
+[Runner profiles](runners/profiles.md) and the [external Codex runner](runners/codex.md) support profile setup and both one-shot and persistent workers. The Codex runner supports HTTP MCP connections. Web chat, OAuth for MCP connections and managed stdio servers are planned.
 
-Критерии изоляции MCP и результаты предварительных проверок описаны в [политике MCP](runners/mcp.md).
+The [MCP policy](runners/mcp.md) describes isolation requirements and the results of preliminary probes.

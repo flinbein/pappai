@@ -1,19 +1,19 @@
-# Какие MCP реально подключает Codex
+# Check which MCP servers Codex connects to
 
-Запуск из корня pappai требует Python 3, Docker и распакованного Linux-дистрибутива Codex CLI. Для воспроизведения на x86_64 проверена версия `0.170.0` из архива `npm pack @openai/codex@0.170.0-linux-x64`. Передайте каталог `package/vendor/x86_64-unknown-linux-musl` из архива.
+Run from the pappai root with Python 3, Docker and an extracted Linux Codex CLI distribution. The probe was verified on x86_64 with version `0.170.0` from `npm pack @openai/codex@0.170.0-linux-x64`. Pass the extracted `package/vendor/x86_64-unknown-linux-musl` directory.
 
 ```sh
 docker build -t pappai:codex-probe .
 python tests/probes/codex-layers/run.py /path/to/package/vendor/x86_64-unknown-linux-musl pappai:codex-probe
 ```
 
-В каждом контейнере с `--network none` локальные HTTP MCP различимы по имени инструмента. Проверка создаёт временные APP A и B с разными домами Codex и доверенными рабочими каталогами. В конфигурации дома каждой APP заданы общий сервер, свой сервер и дополнительный сервер. Проект добавляет ещё один сервер и ссылается на личный сервер другой APP. После `thread/start` проверяются результаты `mcpServerStatus/list` и список адресов, на которые действительно поступили HTTP-запросы. Авторизация и вызовы модели не требуются.
+Each container uses `--network none`. Local HTTP MCPs expose distinct tool names. The probe creates temporary APPs A and B with separate Codex homes and trusted working directories. Each home configures a shared server, a personal server and an extra server. The project adds another server and references the other APP's personal server. After `thread/start` the probe checks both `mcpServerStatus/list` and the addresses actually contacted. It requires no account or model calls.
 
-| Политика контейнера | Обнаруженные MCP |
+| Container policy | Observed MCP servers |
 |---|---|
-| Контроль, без managed requirements | Обе APP обнаруживают все пять имён, включая сервер другой APP |
-| Индивидуальный список для A или B | Только общий сервер и собственный сервер соответствующей APP |
-| APP A отключила общий сервер | Только личный сервер A |
-| Пустой разрешённый список | Нет доступных инструментов и обращений к HTTP MCP |
+| Control without managed requirements | Both APPs discover all five names, including the other APP's server. |
+| Individual allowlist for A or B | Each APP sees only the shared server and its own server. |
+| A disables the shared server | Only A's personal server. |
+| Empty allowlist | No tools or HTTP MCP requests. |
 
-В тесте у каждого managed-контейнера свой read-only файл `/etc/codex/requirements.toml`. В рабочем раннере этот механизм требует изолированного представления конфигурации для каждого исполнителя. Системный файл, общий для нескольких одновременно работающих APP, не может выражать их разные списки.
+Each managed container has its own read-only `/etc/codex/requirements.toml`. The production runner needs an isolated configuration view for each executor to express different allowlists concurrently.

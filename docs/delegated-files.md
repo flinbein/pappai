@@ -1,6 +1,6 @@
-# Передача файла другой APP
+# Pass file access to another APP
 
-В Linux вызов метода может предоставить исполнителю временный доступ к файлу вызывающей APP или USER. Поля `read`, `write` и `create` располагаются рядом с `data` в параметрах `call`. Путь в `data` подсказывает обработчику, какой файл использовать. Каждая строка в списке полномочий обозначает одно имя файла. Завершающий `/` распространяет выдачу на файлы внутри каталога, включая его подкаталоги.
+On Linux a method call can grant its executor temporary access to files belonging to the calling APP or USER. Put `read`, `write` and `create` next to `data` in the `call` parameters. A path in `data` tells the handler which file to use. Each grant string identifies one file. A trailing slash grants access to files in a directory and its descendants.
 
 ```json
 {
@@ -12,12 +12,12 @@
 }
 ```
 
-| Поле | Операция у вызывающего |
+| Field | Operation on the caller's file |
 |---|---|
-| `read` | Чтение существующего обычного файла. |
-| `create` | Эксклюзивное создание файла. Занятое имя возвращает `EEXIST`. Родительский каталог должен существовать. |
-| `write` | Запись в существующий файл или создание нового. Для чтения добавьте `read`. |
+| `read` | Read an existing regular file. |
+| `create` | Create a new file exclusively. An existing name returns `EEXIST`. The parent directory must exist. |
+| `write` | Write an existing file or create a new one. Add `read` if reading is also required. |
 
-Контроллер проверяет текущие файловые права вызывающего при открытии. У APP в песочнице `/tmp` указывает на её личный временный каталог. Делегирование действует только в рамках конкретного вызова и заканчивается при ответе, ошибке, отмене, таймауте или потере соединения вызывающего исполнителя. Если запись прервалась, её результат может быть частичным. Метод может завершиться, не воспользовавшись выдачей.
+The controller checks the caller's current file permissions at open time. A sandboxed APP's `/tmp` maps to its private temporary directory. A grant belongs to a single call and ends on reply, failure, cancellation, timeout or disconnection of the calling executor. Interrupted writes may leave partial content. The handler can complete a call without using a grant.
 
-Исполнителям process доступны копирование в обе стороны и потоковый обмен по приватному сокету. [Протокол для разработчика](dev/runners/files.md)
+Process executors can copy files in both directions or stream them through a private socket. [File protocol](dev/runners/files.md)

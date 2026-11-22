@@ -1,8 +1,8 @@
-# Восстановление двух томов
+# Restoring both volumes
 
-Том `platform` содержит базу SQLite и данные платформы. В `workspace` лежат пользовательские файлы. Снимайте оба тома после остановки контроллера. Храните архив в закрытом каталоге оператора: в базе есть учётные записи и действующие веб-сессии.
+The `platform` volume holds the SQLite database and platform data. The `workspace` volume holds user files. Stop the controller before taking a snapshot of both volumes. Keep the archive in a private operator directory because the database contains account information and active web sessions.
 
-Пример для Linux с Compose из этого репозитория. В каталоге проекта создайте архив.
+On Linux with the Compose file from this repository, create an archive from the project directory.
 
 ```sh
 umask 077
@@ -13,7 +13,7 @@ docker compose run --rm --no-deps -v "$PWD/backups:/backup" controller \
 docker compose start controller
 ```
 
-Для проверки разверните ту же версию на отдельной тестовой установке с **двумя новыми пустыми томами**. Поместите архив в её каталог `backups` и распакуйте до запуска контроллера.
+To verify the backup, deploy the same version to a separate test installation with **two new, empty volumes**. Place the archive in that installation's `backups` directory and extract it before starting the controller.
 
 ```sh
 docker compose run --rm --no-deps -v "$PWD/backups:/backup:ro" controller \
@@ -21,6 +21,6 @@ docker compose run --rm --no-deps -v "$PWD/backups:/backup:ro" controller \
 docker compose up -d controller
 ```
 
-Проверьте файл с известным содержимым в `/workspace`, дерево нод, действующий манифест и вызов метода. Для проверки прежнего passkey браузеру нужен исходный RP ID и допустимый origin. Автоматический тест использует временные тома и тестовый passkey. Он останавливает один контейнер и открывает второй с восстановленными данными по прежнему адресу. [Браузерная проверка](../../tests/browser-acceptance.mjs)
+Verify a file with known contents in `/workspace`, the node tree, the active manifest and a method call. To test the original passkey, the browser needs the original RP ID and an allowed origin. The automated test uses temporary volumes and a test passkey. It stops one container and opens a second one at the same address with the restored data. [Browser acceptance test](../../tests/browser-acceptance.mjs)
 
-Чтобы связать образ с версией, в чистой копии репозитория выполните `docker build --label "org.opencontainers.image.revision=$(git rev-parse HEAD)" -t "pappai:$(git rev-parse --short HEAD)" .`. Для точного восстановления сохраняйте выпущенный образ или digest в реестре вместе с архивом: базовый образ Alpine и его пакеты могут обновиться.
+To associate an image with a revision, run `docker build --label "org.opencontainers.image.revision=$(git rev-parse HEAD)" -t "pappai:$(git rev-parse --short HEAD)" .` in a clean checkout. Preserve the released image or its registry digest alongside the backup for an exact restore. The Alpine base image and its packages can change.

@@ -49,6 +49,14 @@ function fixture() {
   });
   return { runner, node, controller: new Controller(store, runner) };
 }
+test('help describes core operations and preserves the manifest author’s documentation', () => {
+  const { controller, node } = fixture();
+  node.manifest = structuredClone(manifest);
+  node.manifest.run.settings.features[method].description = 'Trim a message.';
+  const result = controller.help('owner', {node: 'app', features: ['$.app.restart', method]});
+  assert.equal(result.features['$.app.restart'], 'METHOD;Restart execution and preserve queued work.');
+  assert.equal(result.features[method], 'METHOD;Trim a message.');
+});
 test('forbidden, invalid version and invalid input are rejected before dispatch', async () => {
   const { controller, runner } = fixture();
   await assert.rejects(controller.call('other', { node: 'app', method }), /permission/i);

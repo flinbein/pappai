@@ -1,26 +1,26 @@
-# Файловые запросы исполнителя process
+# File requests from a process worker
 
-Обработчик отправляет запросы в stdout и читает ответы с тем же локальным строковым `id` из stdin. В `callId` передают системный ID назначения метода. Контроллер сверяет экземпляр исполнителя, назначение, область пути и действующие файловые права. Завершите файловые операции перед успешным ответом на назначение. [Формат выдачи](../../delegated-files.md) · [Транспорт process](process.md)
+The handler writes requests to stdout and reads replies carrying the same worker-local string `id` from stdin. Set `callId` to the system ID of the assigned method call. The controller checks the worker instance, assignment, path scope and current file permissions. Finish file operations before returning a successful result for the assignment. [Delegation format](../../delegated-files.md) · [Process transport](process.md)
 
-## Копирование
+## Copying a file
 
-Для запроса работающего процесса ядро учитывает файловое представление этого экземпляра при запуске и действующие на момент открытия пермиты. Расширение прав получает следующий экземпляр. При сужении прав новые файловые операции ограничиваются сразу. Путь `/tmp` сохраняет привязку к файловой системе выдавшего его исполнителя.
+For a running process, the controller uses both its filesystem view at launch and the permits in effect when it opens the file. An expansion of access takes effect for the next worker instance. Narrower permissions apply to new file operations immediately. A `/tmp` path remains bound to the filesystem of the worker that granted it.
 
 ```jsonl
 {"id":"copy-1","method":"files.copy","params":{"callId":"call-58","from":{"self":"/tmp/photo.png"},"to":{"caller":"/tmp/photos/result.png"}}}
 {"id":"copy-1","result":{"bytesCopied":2097152}}
 ```
 
-Один запрос копирует один обычный файл между сторонами `self` и `caller`. Контроллер передаёт данные порциями. При выдаче `write` он заменяет содержимое файла назначения целиком. При выдаче только `create` он открывает новое имя эксклюзивно. Источник сохраняется, копирование файла поверх самого себя возвращает ошибку. На стороне `self` используются собственные права исполнителя. Путь должен быть абсолютным, нормализованным, без символических ссылок. Служебные деревья `/proc`, `/dev`, `/sys`, `/run` закрыты.
+One request copies one regular file between `self` and `caller`. The controller transfers data in chunks. With a `write` grant it replaces the entire destination file. With only `create`, it opens a new name exclusively. The source is preserved. Copying a file onto itself returns an error. The `self` side uses the worker's own permissions. The path must be absolute and normalized with no symbolic links. The service trees `/proc`, `/dev`, `/sys` and `/run` are inaccessible.
 
-## Поток
+## Streaming
 
 ```jsonl
 {"id":"file-1","method":"files.open","params":{"callId":"call-58","path":"/tmp/photos/result.png","mode":"create"}}
 {"id":"file-1","result":{"handle":"8b3915ca-bad7-40f5-9a93-c68d4b3fbd40"}}
 ```
 
-В песочнице подключитесь к Unix-сокету `/run/pappai/files`. У доверенного process путь передаётся в `PAPPAI_FILES_SOCKET`. Протокол — HTTP/1.1. Для режима `read` запросите `GET /<handle>`. Для `write` и `create` отправьте `PUT /<handle>` с бинарным телом и корректным `Content-Length` либо с обычным HTTP chunked-кодированием и завершающим нулевым блоком. При успешной записи ответ имеет статус 200 и JSON вида `{"bytesWritten":25401}`. Потоковая запись начинается с нулевого смещения и сохраняет старый хвост файла, если новые данные короче.
+In the sandbox, connect to the Unix socket at `/run/pappai/files`. For a trusted process the path is in `PAPPAI_FILES_SOCKET`. The protocol is HTTP/1.1. For `read`, request `GET /<handle>`. For `write` and `create`, send `PUT /<handle>` with a binary body and either a correct `Content-Length` or standard HTTP chunked encoding with the terminating zero-length chunk. A successful write returns HTTP 200 and JSON such as `{"bytesWritten":25401}`. A streaming write starts at offset zero. If the new data is shorter than the original file, the old trailing bytes remain.
 
 ```js
 import http from 'node:http';
@@ -48,4 +48,4 @@ async function upload(handle, source) {
 }
 ```
 
-Handle одноразовый и действует на сокете назначенного исполнителя. Закрытие вызова прерывает активные потоки и отзывает неиспользованные handle. Незаконченная запись блокирует успешный ответ метода. После обрыва загрузки завершите вызов ошибкой. На один вызов одновременно допускается до 32 handle и копирований суммарно.
+A handle is single-use and works on the assigned worker's socket. Closing the call interrupts active streams and revokes unused handles. An unfinished write blocks a successful method reply. If an upload breaks off, finish the call with an error. Each call allows up to 32 concurrent handles and copy operations combined.

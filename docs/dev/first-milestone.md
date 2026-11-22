@@ -1,8 +1,8 @@
-# Проверка первой сборки
+# Verifying the first build
 
-1. В пустом workspace зарегистрируйте администратора по passkey. Создайте TEAM, USER и остановленную APP со встроенным манифестом. После перезапуска контроллера проверьте дерево и настройки в SQLite.
-2. Запустите APP и найдите `message.extractText` через `help`. Вызов с `{"text":"  Привет  "}` должен вернуть `"Привет"`. Раннер передаёт запрос одноразовому процессу в песочнице. [Первый вызов из панели](../first-call.md)
-3. Повторите вызов от USER без права на метод. Контроллер должен отклонить его до передачи раннеру.
-4. Завершите тестовый хост раннера, пока один вызов обрабатывается, а второй ожидает. Оба клиента получают ошибку, APP переходит в `error`. Счётчик назначений позволяет проверить, что работа не запущена повторно.
+1. In an empty workspace, register the administrator with a passkey. Create a TEAM, a USER and a stopped APP with an inline manifest. Restart the controller and check that SQLite retained the tree and settings.
+2. Start the APP and find `message.extractText` through `help`. Calling it with `{"text":"  Hello  "}` should return `"Hello"`. The runner delivers the request to a sandboxed one-shot process. [First call from the panel](../first-call.md)
+3. Repeat the call as a USER without permission to invoke the method. The controller should reject the request before it reaches the runner.
+4. Terminate the test runner host while one call is being processed and another is waiting. Both clients should receive an error, and the APP should enter `error`. Use the assignment count to verify that work was dispatched only once.
 
-Браузерный тест использует отдельный контейнер и виртуальный аутентификатор Chromium. Для проверки изоляции нужны Linux и разрешённые пространства имён bubblewrap. [Команды проверки](README.md#проверка-сборки) · [Сценарий браузера](../../tests/browser-acceptance.mjs) · [Авария раннера](../../tests/runner-loss.test.ts)
+The browser test uses a separate container and a Chromium virtual authenticator. Isolation tests require Linux with permission to create bubblewrap namespaces. [Verification commands](README.md#build-verification) · [Browser scenario](../../tests/browser-acceptance.mjs) · [Runner crash test](../../tests/runner-loss.test.ts)

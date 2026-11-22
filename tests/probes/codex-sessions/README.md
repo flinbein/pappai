@@ -1,8 +1,8 @@
-# История двух APP с одним профилем
+# Session history for two APPs sharing a profile
 
-Проверка запускает два настоящих процесса Codex CLI 0.170.0 с разными `CODEX_HOME`. Оба читают один сгенерированный фиктивный `auth.json`. Локальная имитация Responses API проверяет Bearer-заголовок и возвращает события SSE.
+The probe starts two real Codex CLI 0.170.0 processes with separate `CODEX_HOME` directories. Both read a generated dummy `auth.json`. A local Responses API fixture checks the bearer header and returns SSE events.
 
-На Linux x86_64 задайте `CODEX_DIST` равным абсолютному пути к `package/vendor/x86_64-unknown-linux-musl` распакованного официального пакета `@openai/codex@0.170.0-linux-x64`. Из корня pappai запустите в POSIX shell:
+On Linux x86_64 set `CODEX_DIST` to the absolute path of the extracted `package/vendor/x86_64-unknown-linux-musl` from the official `@openai/codex@0.170.0-linux-x64` package. Run the following in a POSIX shell from the repository root.
 
 ```sh
 (
@@ -18,4 +18,4 @@
 )
 ```
 
-Первый контейнер записывает по одному ходу каждой APP. В следующем контейнере `thread/list` возвращает каждой APP только её thread, попытка `thread/resume` по чужому ID завершается ошибкой, а собственный ID восстанавливает обе реплики. Фикстура также проверяет, что следующий запрос модели содержит только собственный маркер истории. Граница проверки — видимость истории по API при раздельных каталогах. Ограничение прямого доступа к файлам требует отдельной песочницы.
+The first container records one turn per APP. In the second container, `thread/list` shows each APP only its own thread, `thread/resume` rejects the other APP's ID, and resuming the APP's own thread restores both messages. The fixture also checks that the next model request contains only the caller's history marker. This measures API visibility with separate homes. Direct filesystem access requires its own sandbox.

@@ -1,33 +1,33 @@
-# Первый вход и восстановление доступа
+# Sign-in and account recovery
 
-Контроллер и административная команда используют файл SQLite, заданный переменной `PAPPAI_DB` (по умолчанию `data/pappai.sqlite`). В контейнере выполняйте команду там, где подключён том с данными текущего контроллера.
+The controller and admin CLI use the SQLite database in `PAPPAI_DB` (default `data/pappai.sqlite`). Run the CLI inside the container with the live controller's data volume mounted.
 
-## Первый администратор
+## First administrator
 
-Из корня проекта выполните команду от имени оператора установки:
+Run this command from the repository root as the installation operator.
 
 ```sh
 npm run admin -- admin owner@example.org
 ```
 
-Команда создаёт работающего USER с полными правами в корне workspace и выводит одноразовый код для регистрации ключа. Откройте панель с настроенного публичного адреса, введите email и код, затем подтвердите создание passkey на устройстве. Код действует 10 минут. После его обмена у браузера есть 30 минут для завершения регистрации. У работающего USER регистрация также открывает веб-сессию. Для следующих входов выберите вход по passkey и подтвердите его на устройстве. Email при этом вводить не требуется.
+The command creates a working USER with full permissions at the workspace root and prints a one-time passkey registration code. Open the panel at its configured public address, enter the email and code, then confirm passkey creation on your device. The code lasts ten minutes. After exchanging it, the browser has thirty minutes to finish registration. Registering a key for a working USER also opens a web session. For later visits, select passkey sign-in and confirm on your device.
 
-Для разработки подходит `http://localhost:3000`. Внешний адрес должен использовать HTTPS через обратный прокси. Прокси должен сохранять исходный `Host`. Этот адрес определяет origin панели и домен passkey. Используйте современный браузер с поддержкой WebAuthn, JSON-преобразования credential и обнаруживаемых ключей.
+Use `http://localhost:3000` for development. External access requires HTTPS through a reverse proxy that preserves the original `Host`. This address determines the panel origin and passkey domain. Use a browser that supports WebAuthn, JSON credential conversion and discoverable credentials.
 
-## Выдать код существующему USER
+## Issue a code to an existing USER
 
 ```sh
 npm run admin -- otp user@example.org
 ```
 
-Новый код заменяет предыдущий. Уже зарегистрированные ключи сохраняются. Остановленный USER может зарегистрировать ключ, но войдёт только после запуска его ноды. Локальная утилита и почтовая форма используют отдельные коды. Новый код заменяет предыдущий в том же канале.
+Issuing a code replaces the previous code from the same channel. Existing passkeys remain valid. A stopped USER can register a key and can sign in once its node starts. The local CLI and email form issue separate codes.
 
-### Код по электронной почте
+### Email recovery
 
-В форме входа выберите «Получить код по email». USER требуется право вызвать для себя `$.user.recovery.send` и `$.user.passkeys.create`. Первый метод также может вызвать авторизованный отправитель из панели. Контроллер проверяет право регистрации в момент добавления ключа. Один адрес может получить до десяти писем в сутки с интервалом не менее десяти минут. Ответ публичной формы одинаков для всех адресов.
+Select email recovery on the sign-in form. The USER needs permission to call `$.user.recovery.send` and `$.user.passkeys.create` on itself. An authorized caller can also call the first method from the panel. The controller checks registration permission when adding the key. An address can receive up to ten messages per day, at least ten minutes apart. The public form gives the same response for every address.
 
-Для доставки задайте `PAPPAI_SMTP_HOST`, `PAPPAI_SMTP_FROM`, `PAPPAI_SMTP_USER` и `PAPPAI_SMTP_PASSWORD` в окружении контроллера. По умолчанию используется TLS на порту 465. Для STARTTLS установите `PAPPAI_SMTP_TLS=starttls` (порт 587). Порт переопределяется через `PAPPAI_SMTP_PORT`.
+Set `PAPPAI_SMTP_HOST`, `PAPPAI_SMTP_FROM`, `PAPPAI_SMTP_USER` and `PAPPAI_SMTP_PASSWORD` in the controller environment. TLS on port 465 is the default. Use `PAPPAI_SMTP_TLS=starttls` for STARTTLS on port 587. Override the port with `PAPPAI_SMTP_PORT`.
 
-**Восстановление администратора** выполняет та же команда `admin`, что и первичная настройка. Для существующего email это привилегированный сброс: аккаунт перемещается в корень workspace и получает полные права, прежние ключи и сессии отзываются. Для дополнительного ключа без сброса используйте `otp`.
+**Administrator recovery** uses the same `admin` command as initial setup. Running it for an existing email moves the account to the workspace root, grants full permissions, and revokes existing keys and sessions. To add another key while keeping existing access, use `otp`.
 
-Обычная сессия привязана к конкретному passkey. Срок сессии составляет до 30 дней с ограничением в сутки бездействия. Выход завершает текущую сессию.
+Each session belongs to a specific passkey. Sessions last up to thirty days and expire after one day of inactivity. Signing out ends the current session.

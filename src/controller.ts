@@ -4,6 +4,7 @@ import { prepare } from './manifest.ts';
 import { mask as maskSource } from './manifest-sources.ts';
 import { matchesName, validNodes, type Rule } from './permits.ts';
 import { compileSubscriptions, changeSubscriptions } from './subscriptions.ts';
+import { systemDescription } from './system-help.ts';
 import { DeliveryReports, type DeliveryNotice } from './delivery-reports.ts';
 import type { Store } from './store.ts';
 import type { ProcessRunner, Assignment, InputRecord } from './runner.ts';
@@ -15,7 +16,7 @@ type Pending = {
   resolve:(value:unknown)=>void; reject:(issue:Error)=>void; timer:NodeJS.Timeout;
 };
 type Worker = {
-  id:string; appId:string; profileId?:string; sandboxState?:string; runnerType:string; persistent:boolean; started:boolean;
+  id:string; appId:string; profileId?:string; sandboxState?:string; profileMcpNetwork?:boolean; runnerType:string; persistent:boolean; started:boolean;
   retiring:boolean; profileRevoked?:boolean; stopRequested?:boolean; writing?:string; calls:Set<string>; requests:number; abort:AbortController;
   idleTimeoutMs?:number|null; idle?:NodeJS.Timeout; first?:Work; maxRestarts:number;
 };
@@ -252,8 +253,9 @@ export class Controller {
       const changed=(app.profile ?? undefined)!==worker.profileId;
       let denied=false;
       try {
-        this.store.profileFor(app);
-        if (!changed && worker.sandboxState===JSON.stringify(this.store.sandbox(app.id))) continue;
+        const sandbox=this.store.sandbox(app.id);
+        if (!changed && worker.sandboxState===JSON.stringify(sandbox) && (worker.profileMcpNetwork===undefined ||
+          worker.profileMcpNetwork===this.store.profileMcpNetwork(app,sandbox?.network ?? true))) continue;
       } catch { denied=true; }
       if (!worker.profileRevoked) {
         worker.profileRevoked=true;
@@ -373,7 +375,16 @@ export class Controller {
         const job:Assignment = {...input,appId,...(worker.profileId && {profileId:worker.profileId}),runnerType:config.runnerType,mode:config.mode,
           holdFirst:!!worker.first,settings:{...config.settings,...(config.settings.env && {env:{...config.settings.env}})},
           sandbox:this.store.sandbox(appId),maxLifetimeMs:config.maxLifetimeMs};
-        if (worker.profileId) worker.sandboxState=JSON.stringify(job.sandbox);
+        if (worker.profileId) {
+          worker.sandboxState=JSON.stringify(job.sandbox);
+          job.profileMcpNetwork=this.store.profileMcpNetwork(app,job.sandbox?.network ?? true);
+          const mcp=job.settings.mcp;
+          if (mcp && typeof mcp==='object' && 'profile' in mcp && Array.isArray(mcp.profile) && mcp.profile.length) {
+            worker.profileMcpNetwork=job.profileMcpNetwork;
+            // Older runners use the selection directly. Keep their input bounded, including when registered under an alias.
+            if (!job.profileMcpNetwork) job.settings.mcp={...mcp,profile:[]};
+          }
+        }
         this.hooks.executorStart?.(job);
         this.runner.dispatch(job);
       }
@@ -659,10 +670,10 @@ export class Controller {
       entries.set(name, {
         type: 'method',
         version: '1',
-        description: name.split('.').slice(1).join(' '),
+        description: systemDescription(name),
       });
     const events = app.type === 'app' ? appEvents : app.type === 'workspace' ? ['$.workspace.init'] : ['$.node.created','$.node.permissions.updated'];
-    for (const name of events) entries.set(name,{type:'event',version:'1',description:name.split('.').slice(1).join(' ')});
+    for (const name of events) entries.set(name,{type:'event',version:'1',description:systemDescription(name)});
     const result: Record<string, any> = { versions: Object.create(null) };
     const supplied = ['features', 'schemas', 'docs'].some((k) => Object.hasOwn(params, k));
     for (const section of ['features', 'schemas', 'docs']) {

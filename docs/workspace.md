@@ -1,21 +1,15 @@
-# Рабочее пространство и APP
+# Workspace and APPs
 
-Страница описывает принятую модель v1.
+The workspace is the root of the tree. TEAM nodes group nodes and define access boundaries. USER represents an account. APP represents an application with an address, permissions and subscriptions. For example, a Telegram bot integration and its chat agent can be separate APPs. The agent can receive permission to send messages while the integration retains the bot token.
 
-**Workspace** — корень дерева. Внутри него **TEAM** объединяют ноды и задают границы доступа. **USER** представляет пользователя, **APP** — приложение с собственным адресом, пермитами и подписками. Например, Telegram-интеграция и агент, который отвечает в чате, могут быть двумя отдельными APP. Тогда разрешение вызвать метод отправки сообщения можно выдать агенту независимо от доступа к токену бота.
+- **Runner and mode.** Choose `process` for a script or `codex` for a Codex agent. A persistent executor suits a bot that holds an open connection. A one-shot executor handles an incoming event or call and then exits.
+- **Permissions and subscriptions.** Permissions determine which operations are available. Subscriptions select events within those permissions. A subscription to incoming messages does not grant the right to send a reply.
+- **Startup.** A new APP is stopped. After starting, `working` means it can accept work, even when no process has launched yet. A bot that needs to connect immediately can subscribe to its own transition to `working`.
 
-При настройке APP важны три решения.
+Use `dir` to list visible nodes and `help` to inspect methods and events. The controller checks permissions when a method is called. See the [process runner contract](dev/runners/process.md) and [APP events and subscriptions](app-exchange.md).
 
-- **Раннер и режим.** Для скрипта выбирают `process`, для агента Codex — `codex`. Постоянный процесс подходит боту, который держит соединение. Одноразовый — обработчику, который запускается для одного входящего события или вызова и затем завершается.
-- **Права и подписки.** Пермиты определяют доступные операции. Подписки отбирают события, которые APP хочет получать в пределах своих прав. Например, подписка агента на сообщения бота сама по себе не даёт агенту права отправлять ответы.
-- **Запуск.** Новая APP создаётся остановленной. После запуска статус `working` означает готовность принимать работу. В этот момент у APP может ещё не быть запущенного процесса. Боту, который должен установить соединение сразу, нужна подписка на переход своей APP в `working`.
+## File permissions
 
-Список доступных нод предоставляет `dir`, описание методов и событий — `help`. Ядро проверяет права при самом вызове метода. Формат передачи работы скрипту описан в [контракте раннера process](dev/runners/process.md).
+Use absolute container paths in `read` and `write`. On Linux the controller checks each existing component when saving permissions. A symbolic link, including a dangling link, rejects the whole change. You can specify a missing name in advance. Create the files and directories needed for mounts before launching the executor. The runner checks mount points again at launch.
 
-[События, вызовы и личные подписки APP](app-exchange.md)
-
-### Файловые пермиты
-
-В полях `read` и `write` указывайте абсолютные пути контейнера. При сохранении Linux-контроллер проверяет все уже существующие части каждого пути. Символическая ссылка, в том числе сломанная, отклоняет изменение целиком. Отсутствующее имя можно указать заранее. Перед запуском создайте файлы и каталоги, необходимые для монтирования. Раннер проверит точки монтирования повторно.
-
-Пока исполнитель работает, сохраняйте имена и расположение закрытых объектов и отдельно смонтированных файлов и каталогов. Содержимое доступного на запись файла можно изменять. Внутри разрешённого каталога обычные символьные ссылки разрешаются средствами песочницы. [Монтирование и ограничения process](dev/runners/process.md) · [Файлы в панели](user-files.md)
+Keep the names and locations of hidden objects and individually mounted files or directories stable while the executor runs. A writable file can be modified in place. Inside an allowed directory the sandbox resolves ordinary symbolic links. [Process mounts and limits](dev/runners/process.md) · [File browser](user-files.md)

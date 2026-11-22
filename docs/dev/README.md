@@ -1,23 +1,23 @@
-# Разработка pappai
+# Developing pappai
 
-Контроллер владеет деревом нод, пермитами, очередями и состоянием вызовов. Раннер управляет исполнителями, применяет требуемую изоляцию и сообщает ядру прикладной контракт APP. Один раннер может обслуживать несколько APP.
+The controller owns the node tree, permissions, queues and call state. A runner manages workers, enforces isolation and provides the controller with the APP's method and event contract. One runner can serve several APPs.
 
-- [Первая сквозная сборка](first-milestone.md) — порядок работ и наблюдаемый критерий готовности.
-- [Веб-терминал](web-terminal.md) — авторизация WebSocket, PTY и завершение процессов.
-- [Восстановление двух томов](restore.md) — резервная копия, установка из архива и проверка.
-- [Дальнейший план](roadmap.md) — предлагаемые этапы после первой сборки и сценарии их приёмки.
-- [Архитектурные решения](architecture-review.md) — владение вызовами, подготовка конфигурации и доверие к издателю.
-- [Доставка работы раннером process](runners/process.md) — формат stdin, жизненный цикл вызова и отличие от доставки в Codex.
-- [Рабочее пространство и APP](../workspace.md) — как эти решения проявляются при настройке.
+- [First end-to-end build](first-milestone.md) lists the steps and expected results.
+- [Web terminal internals](web-terminal.md) describes WebSocket authentication, the PTY and process cleanup.
+- [Restoring both volumes](restore.md) covers backups, restoration and verification.
+- [Roadmap](roadmap.md) lists the stages after the first build and links to acceptance criteria.
+- [Controller design](architecture-review.md) explains call ownership, configuration changes and trust in package publishers.
+- [The process runner](runners/process.md) describes stdin delivery and the call lifecycle.
+- [Workspace and APPs](../workspace.md) explains how to configure the platform.
 
-## Проверка сборки
+## Build verification
 
-`npm ci`, `npm run typecheck` и `npm test` проверяют серверный TypeScript и локальные сценарии. Linux-проверки bubblewrap запускаются с `PAPPAI_TEST_BWRAP=1` там, где доступны разрешённые пространства имён. `node tests/browser-acceptance.mjs` проверяет локальную Docker-сборку в Chromium с виртуальным аутентификатором. Путь к браузеру при необходимости задайте через `PAPPAI_CHROME_BIN`.
+Run `npm ci`, `npm run typecheck` and `npm test` to check the server-side TypeScript and local scenarios. Enable Linux bubblewrap tests with `PAPPAI_TEST_BWRAP=1` on a host that allows the required namespaces. Run `node tests/browser-acceptance.mjs` to check the local Docker build in Chromium with a virtual authenticator. Set `PAPPAI_CHROME_BIN` to provide the browser path if necessary.
 
-## Протоколы
+## Protocols
 
-- [Реестр раннеров](runners/registry.md)
-- [Установка раннера Codex и CLI](runners/codex.md)
-- [Профили раннеров](runners/profiles.md) и [подключения MCP](runners/mcp.md)
-- [HTTP и источники манифеста](manifest-http.md)
-- [Передача файлов](runners/files.md)
+- [Runner registry](runners/registry.md)
+- [Installing the Codex runner and CLI](runners/codex.md)
+- [Runner profiles](runners/profiles.md) and [MCP connections](runners/mcp.md)
+- [Manifest sources and HTTP](manifest-http.md)
+- [File transfers](runners/files.md)

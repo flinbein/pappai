@@ -1,45 +1,45 @@
-# Реестр раннеров
+# Runner registry
 
-Управляйте раннерами методами workspace (`node: "~"`). Нужна работающая APP или USER с неограниченной цепочкой прав. Код раннера работает с правами контроллера. Устанавливайте только доверенные модули и обеспечьте доступность их файлов после перезапуска контейнера.
+Manage runners through workspace methods (`node: "~"`). The caller must be a running APP or a USER with an unrestricted permission chain. Runner code executes with the controller's privileges. Install only trusted modules and keep their files accessible after container restarts.
 
-| Метод | Результат |
+| Method | Result |
 |---|---|
-| `$.runners.get({})` | Возвращает список, путь, признаки включения и доступности |
-| `$.runners.add({name,entrypoint,settingsSchema?,config?})` | Регистрирует модуль, схему настроек APP и административную конфигурацию установленного раннера. Запускает хост с IPC. |
-| `$.runners.restart({name,config?})` | Останавливает прежних исполнителей, применяет переданную конфигурацию раннера целиком, загружает код и публикует `$.app.restarted` для затронутых работающих APP. При отсутствии `config` использует сохранённое значение. |
-| `$.runners.disable({name})` | Останавливает раннер и переводит затронутые работающие APP в `error` |
-| `$.runners.enable({name})` | Запускает отключённый раннер. APP в статусе ошибки запускает оператор |
-| `$.runners.delete({name})` | Останавливает и удаляет запись. Встроенный `process` допускает отключение |
+| `$.runners.get({})` | Lists runners, paths, enabled state and availability. |
+| `$.runners.add({name,entrypoint,settingsSchema?,config?})` | Registers a module, its APP settings schema and the installed runner's administrative configuration. Starts the host with IPC. |
+| `$.runners.restart({name,config?})` | Stops the old workers, replaces the entire administrative configuration if supplied, reloads the code and publishes `$.app.restarted` for affected running APPs. Omitting `config` preserves the stored value. |
+| `$.runners.disable({name})` | Stops the runner and moves affected running APPs to `error`. |
+| `$.runners.enable({name})` | Starts a disabled runner. The operator starts APPs that are in `error`. |
+| `$.runners.delete({name})` | Stops the runner and removes its registry entry. The built-in `process` runner can be disabled. |
 
-Связь исполнителя с вызовом хранит контроллер. Авария хоста раннера завершает его ожидающие вызовы ошибкой. Маршрутизация между раннерами продолжается для доступных APP. Для обновления файлов раннера заранее подготовьте согласованную версию модуля и зависимостей, затем вызовите `restart`.
+The controller tracks each call's assigned worker. A runner host crash fails its pending calls. Routing between runners continues for available APPs. To update runner files, prepare compatible versions of the module and dependencies, then call `restart`.
 
-## Настройки и контракт APP
+## APP settings and contract
 
-Манифест выбирает зарегистрированное имя через `run.type`. Для стороннего раннера `run.settings` — JSON-объект c его собственными полями. Ядро компилирует необязательный словарь `features` в прикладной контракт и подписки из общего раздела `subscriptions`. Для нового кандидата контроллер проверяет параметры по `settingsSchema` из реестра. Схема проверяет объект после применения override, извлечения `features` и раскрытия секретов `env`. Затем контроллер может добавить в окружение служебные адреса конкретного назначения. Правила `command`, `cwd` и `args` принадлежат встроенному `process`.
+The manifest selects a registered name through `run.type`. For an external runner, `run.settings` is a JSON object with runner-defined fields. The controller compiles the optional `features` dictionary into the application contract and reads subscriptions from the common `subscriptions` section. It validates each candidate's settings against the registry's `settingsSchema` after applying overrides, extracting `features` and expanding `env` secrets. It can then add service addresses for a specific assignment to the environment. The built-in `process` runner defines the rules for `command`, `cwd` and `args`.
 
-Например, раннер с настройкой `{"prefix":"отчёт "}` может зарегистрировать схему `{"type":"object","properties":{"prefix":{"type":"string"}},"required":["prefix"],"additionalProperties":false}`. В манифесте рядом с `prefix` можно объявить метод в `features`. Список реестра возвращает сохранённую схему. Контракт и схема v1 декларативны. Динамическое согласование контракта с процессом раннера относится к дальнейшему развитию.
+For example, a runner that accepts `{"prefix":"report "}` can register the schema `{"type":"object","properties":{"prefix":{"type":"string"}},"required":["prefix"],"additionalProperties":false}`. The manifest can declare a method in `features` alongside `prefix`. The registry list returns the saved schema. The v1 contract and schema are declarative. Dynamic contract negotiation with the runner process is planned.
 
-## Сообщения IPC
+## IPC messages
 
-Контроллер открывает модуль через Node.js `fork()`. Хост получает сообщения в `process.on("message", …)` и отвечает через `process.send({type,payload})`. Управляющий IPC отделён от ввода и вывода пользовательского процесса. Хост обязан применить переданные ограничения песочницы либо сообщить об ошибке запуска.
+The controller opens the module with Node.js `fork()`. The host receives messages through `process.on("message", …)` and replies through `process.send({type,payload})`. Control IPC is separate from user process I/O. The host must enforce the supplied sandbox constraints or report launch failure.
 
-| Контроллер → хост | Действие |
+| Controller → host | Action |
 |---|---|
-| `{type:"dispatch",job}` | Создать исполнителя. В `job` находятся `id` исполнителя, `appId`, `runnerType`, `mode`, `settings`, `sandbox`, первая работа (`from`, `method` либо `event`, `data`), возможные `maxLifetimeMs` и `runtimeMounts`. У стороннего раннера `holdFirst:false`: он передаёт первую запись сам. При `holdFirst:true` первое назначение придёт отдельным `deliver` после запуска. |
-| `{type:"deliver",id,item}` | Передать исполнителю запись с её системным ID. Для постоянного процесса каждую передачу нужно подтвердить через `written`. |
-| `{type:"response",id,requestId,response}` | Доставить результат либо ошибку исходящего запроса исполнителя. |
-| `{type:"reject",id,callId,message}` | Ответ исполнителя отклонён. Например, ошибочный результат можно исправить до дедлайна вызова. |
-| `{type:"notify",id,notification}` | Доставить служебное уведомление исполнителю. |
-| `{type:"stop",id}`, `{type:"close"}` | Остановить указанного исполнителя либо весь хост с его исполнителями. После завершения `close` закрыть IPC. |
+| `{type:"dispatch",job}` | Create a worker. The job includes its `id`, `appId`, `runnerType`, `mode`, `settings`, APP `sandbox` and first record (`from`, `method` or `event`, and `data`). It can include `maxLifetimeMs` and `runtimeMounts`. For a selected profile, `profileMcpNetwork` supplies the combined APP and PROFILE network decision for profile HTTP MCP. With `holdFirst:false`, an external runner delivers the first record itself. With `holdFirst:true`, the first assignment arrives in a separate `deliver` after startup. |
+| `{type:"deliver",id,item}` | Deliver the record with its system ID. A persistent process must acknowledge each delivery with `written`. |
+| `{type:"response",id,requestId,response}` | Deliver the result or error from a worker's outgoing request. |
+| `{type:"reject",id,callId,message}` | The controller rejected the worker's reply. An invalid result can be corrected before the call deadline. |
+| `{type:"notify",id,notification}` | Deliver a system notification to the worker. |
+| `{type:"stop",id}`, `{type:"close"}` | Stop the specified worker or the entire host and its workers. Close IPC after completing `close`. |
 
-| Хост → контроллер, поля `payload` | Когда отправить |
+| Host → controller, with `payload` fields | When to send |
 |---|---|
-| `started {appId,id}` | Запуск исполнителя подтверждён. |
-| `written {appId,workerId,id}` | Запись с ID `id` передана исполнителю `workerId`. |
-| `reply {appId,workerId,id,result}` или `{appId,workerId,id,error}` | Завершить назначенный вызов. Здесь `id` — системный ID этого вызова. |
-| `request {appId,workerId,id,method,params}` | Исполнитель инициирует RPC под собственными правами. Он получит `response` по локальному ID запроса. |
-| `exit {appId,id,issue?,startFailed?,stopFailed?}` | Исполнитель завершился. Поля ошибок позволяют контроллеру различить сбой запуска и неподтверждённую остановку. |
+| `started {appId,id}` | Confirm worker startup. |
+| `written {appId,workerId,id}` | Record `id` was delivered to worker `workerId`. |
+| `reply {appId,workerId,id,result}` or `{appId,workerId,id,error}` | Complete the assigned call. Here `id` is the system ID of that call. |
+| `request {appId,workerId,id,method,params}` | The worker initiates an RPC with its own permissions. It will receive a `response` under its local request ID. |
+| `exit {appId,id,issue?,startFailed?,stopFailed?}` | The worker has exited. The error fields distinguish launch failure from an unconfirmed stop. |
 
-[Проверка настоящего стороннего хоста с собственной схемой](../../../tests/custom-runner.test.ts) · [Встроенный process](process.md)
+[External host test with a custom schema](../../../tests/custom-runner.test.ts) · [Built-in process runner](process.md)
 
-Хост получает административный `config` как JSON в `PAPPAI_RUNNER_CONFIG`. Список раннеров скрывает его содержимое. Через сообщение `profileMethods` хост объявляет относительные имена методов PROFILE. Контроллер добавляет префикс зарегистрированного раннера, проверяет пермиты и направляет `profileCall` тому же хосту. `profileRead` с ID открытого вызова и путём запрашивает до 1 МиБ из файлового представления вызывающего. `profileFile` возвращает содержимое через IPC в base64. Обычное завершение, отмена, таймаут или потеря хоста закрывают право на последующее чтение. [Пример внешнего раннера](codex.md)
+The host receives the administrative `config` as JSON in `PAPPAI_RUNNER_CONFIG`. Registry listings omit its contents. The host announces relative PROFILE method names in a `profileMethods` message. The controller prefixes them with the registered runner name, checks permits and sends `profileCall` to the same host. A `profileRead` with an open call ID and a path requests up to 1 MiB from the caller's filesystem view. A `profileFile` reply carries the contents as base64 over IPC. Completion, cancellation, timeout or loss of the host ends the right to read again. [External runner example](codex.md)

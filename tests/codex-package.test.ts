@@ -66,7 +66,7 @@ test('installed Codex package imports an authorized profile and handles typed wo
   await call('~','$.runners.add',{name:'codex',entrypoint:process.env.PAPPAI_TEST_CODEX_ENTRYPOINT,
     config:{codexExecutablePath:process.env.PAPPAI_TEST_CODEX_CLI,profilesDir,stateDir:join(root,'state'),
       modelBaseUrl:'http://127.0.0.1:'+port+'/v1'}});
-  const {id:profile}=await call('~','$.profile.create',{name:'test profile',permissions:null});
+  const {id:profile}=await call('~','$.profile.create',{name:'test profile',permissions:[]});
   assert.deepEqual(await call(profile,'codex.setup',{authFile}),{configured:true});
   for (const mode of ['oneShot','persistent']) {
     const {id:app}=await call('~','$.app.create',{name:mode,profile,permissions:[],source:{manifest:{

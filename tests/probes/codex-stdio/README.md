@@ -1,10 +1,10 @@
-# Проверка stdio MCP под профилем pappai
+# Probe stdio MCP under a pappai sandbox policy
 
-Тест запускает настоящий Codex 0.170.0 с пустым `CODEX_HOME`. Временный тред передаёт `mcp_servers` через `thread/start.config`. Доверенная обёртка запускает фиксированный MCP-сервер через `sandboxArgs` из [src/sandbox.ts](../../../src/sandbox.ts), передаёт аргументы в bubblewrap через fd 3 и читает статус через fd 4. Клиент получает список инструментов через `mcpServerStatus/list` с `threadId` и вызывает `inspect` через `mcpServer/tool/call`. Тред работает без обращения к модели. Каждый контейнер имеет только loopback и отдельный временный каталог. Для работы достаточно локального пакета Codex, данные аккаунта не нужны.
+The test starts Codex CLI 0.170.0 with an empty `CODEX_HOME`. An ephemeral thread supplies `mcp_servers` through `thread/start.config`. A trusted wrapper starts a fixed MCP server using [sandboxArgs](../../../src/sandbox.ts), passes bubblewrap arguments through fd 3 and reads status on fd 4. The client lists tools through `mcpServerStatus/list` with a `threadId`, then calls `inspect` through `mcpServer/tool/call`. The thread needs no model call. Each container has only loopback and a separate temporary directory. A local Codex distribution is sufficient.
 
-## Повторный запуск
+## Reproduce
 
-Из корня проекта в PowerShell соберите Linux-образ через `docker build -t pappai:acceptance .`, если он отсутствует. Получите архив командой `npm pack @openai/codex@0.170.0-linux-x64`, распакуйте и укажите в `$native` путь к его каталогу `package/vendor/x86_64-unknown-linux-musl`. В примере архив распакован в локальном каталоге исследований проекта.
+From the repository root in PowerShell, build the Linux image with `docker build -t pappai:acceptance .` if necessary. Run `npm pack @openai/codex@0.170.0-linux-x64`, extract the archive and point `$native` to its `package/vendor/x86_64-unknown-linux-musl` directory. The example assumes the archive was extracted into the project's private probe directory.
 
 ```powershell
 $native = (Resolve-Path '.dev/codex-package-probe/0.170.0/package/vendor/x86_64-unknown-linux-musl').Path
@@ -19,22 +19,22 @@ foreach ($mode in 'online','offline','codex-eof','codex-kill','denied') {
     --mount "type=bind,source=$policy,target=/fixture/src/sandbox.ts,readonly" `
     -e PAPPAI_CODEX_NATIVE=/codex/bin/codex --entrypoint node pappai:acceptance `
     /fixture/tests/probes/codex-stdio/run.mjs $mode
-  if ($LASTEXITCODE -ne 0) { throw "Проверка $mode завершилась ошибкой" }
+  if ($LASTEXITCODE -ne 0) { throw "Probe failed in mode $mode" }
 }
 ```
 
-## Наблюдения 22 ноября 2026
+## Results on November 22, 2026
 
-Docker Engine 29.8.1, Alpine 3.24.2 x86_64, Node 24.21.0, bubblewrap 0.12.0. Согласована версия протокола MCP `2025-06-18`. Во всех четырёх успешных подключениях клиент обнаружил и вызвал единственный инструмент `inspect`.
+The probe used Docker Engine 29.8.1, Alpine 3.24.2 x86_64, Node 24.21.0, bubblewrap 0.12.0 and MCP protocol `2025-06-18`. The client discovered and called the single `inspect` tool in all four successful connections.
 
-| Режим | Что зафиксировал клиент |
+| Mode | Observation |
 |---|---|
-| `online` | При `network:true` MCP прочитал контрольный текст HTTP-сервера на loopback контейнера. После SIGTERM процессу MCP появился маркер `TERM`. |
-| `offline` | При `network:false` соединение с тем же адресом завершилось `ECONNREFUSED`. После SIGKILL обёртке завершились процессы в её sandbox. Маркер штатного завершения MCP отсутствовал. |
-| `codex-eof` | После закрытия stdin app-server завершился с кодом 0. В этом прогоне маркер обработки EOF/TERM в MCP отсутствовал. |
-| `codex-kill` | После SIGKILL app-server сервер MCP получил EOF и завершился. |
-| `denied` | Стандартный профиль Docker запретил создание namespace. Bubblewrap завершился с кодом 1, список инструментов пуст, вызов отклонён, маркер запуска исполняемого файла отсутствовал. |
+| `online` | With `network:true`, MCP read a marker over HTTP on container loopback. SIGTERM to MCP produced a `TERM` marker. |
+| `offline` | With `network:false`, connecting to the same address returned `ECONNREFUSED`. Killing the wrapper with SIGKILL terminated its sandbox processes without a graceful-exit marker. |
+| `codex-eof` | Closing stdin made app-server exit with code 0. This run produced no MCP EOF/TERM handler marker. |
+| `codex-kill` | After SIGKILL to app-server, the MCP server received EOF and exited. |
+| `denied` | Docker's default policy denied namespace creation. Bubblewrap exited with code 1, tool discovery returned an empty list, the call was rejected and no executable startup marker appeared. |
 
-При успешных подключениях MCP прочитал разрешённый файл, получил `EROFS` при попытке изменить его и `ENOENT` для существующего соседнего файла. Контейнер-клиент прочитал результат в разрешённом для записи каталоге. MCP получил явный `FIXTURE_ALLOWED=yes`. Переменная `FIXTURE_OUTER_ONLY` дошла из app-server до обёртки через `env_vars` и отсутствовала внутри MCP, как и `CODEX_HOME`.
+In successful connections MCP read the allowed file, received `EROFS` when writing to it and `ENOENT` for an existing adjacent file. The test client read the output from the writable directory. The MCP process received the explicit `FIXTURE_ALLOWED=yes` variable. `FIXTURE_OUTER_ONLY` reached the wrapper from app-server via `env_vars`. Both it and `CODEX_HOME` were absent inside MCP.
 
-Во всех четырёх сценариях остановки тест наблюдал через `/proc` обёртку, bubblewrap, MCP (PID 1 внутри namespace) и один обычный дочерний процесс. Все четыре процесса работали до действия и завершились после него. В сценарии гибели app-server сервер MCP сам обрабатывает EOF. Проверка характеризует именно такой сервер и отдельно проверяет принудительное завершение через известный PID обёртки. Результаты относятся к тестовой обёртке, которая пока не подключена к рабочему раннеру.
+The four shutdown scenarios tracked the wrapper, bubblewrap, MCP (PID 1 in its namespace) and an ordinary child through `/proc`. All four processes were running beforehand and exited afterwards. In the app-server crash scenario the fixture handles EOF itself. The probe separately demonstrates forced termination via the known wrapper PID. These results apply to the test wrapper. Managed stdio is still outside the production runner.

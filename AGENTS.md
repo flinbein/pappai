@@ -1,7 +1,8 @@
-# Работа над pappai
+# Working on pappai
 
-pappai управляет деревом команд, пользователей и приложений. Контроллер проверяет права, маршрутизирует события и вызовы методов. Раннеры запускают исполнителей APP.
+pappai manages a tree of teams, users, profiles and applications. The controller checks permissions and routes events and method calls. Runners start APP executors.
 
-- Начинай с [вики](docs/README.md). В `docs/` хранится документация для пользователей и агентов, которые настраивают pappai. В [docs/dev/](docs/dev/README.md) описаны устройство контроллера, решения по реализации и контракты раннеров.
-- Держи документацию актуальной в том же изменении, что и код. При изменении поведения или конфигурации обновляй пользовательскую страницу и примеры. Причины неочевидных решений и детали, важные для сопровождения, записывай в `docs/dev/`.
-- Веди вики небольшими тематическими страницами. Связывай их относительными ссылками, в том числе между пользовательским и разработческим разделами. Явно отмечай запланированное поведение, пока оно недоступно в работающей системе.
+- Start with the [wiki](docs/README.md). User documentation covers people and agents configuring a workspace. The [developer guide](docs/dev/README.md) covers controller internals, implementation decisions and runner contracts.
+- Update documentation in the same change as the behavior it describes. Keep examples current and record non-obvious implementation decisions in `docs/dev/`.
+- Write repository documentation and all project-provided `help()` descriptions, docs and schema annotations in English. Keep private design notes in `.dev/` in Russian.
+- Keep wiki pages short, focused and linked with relative paths. Identify planned behavior explicitly.
