@@ -1,0 +1,13 @@
+# Only the files used by the runtime image enter the build context.
+**
+!Dockerfile
+!package.json
+!package-lock.json
+!src/*.ts
+!src/*.py
+!public/*.html
+!public/*.css
+!public/*.js
+!examples/extract-text/manifest.json
+!examples/extract-text/extract.cjs
+**/*.local.*

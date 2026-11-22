@@ -1,0 +1,29 @@
+{
+  "name": "pappai",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.2.0"
+  },
+  "scripts": {
+    "start": "node src/server.ts",
+    "typecheck": "tsc --noEmit",
+    "admin": "node src/admin.ts",
+    "test": "node --test tests/*.test.ts"
+  },
+  "dependencies": {
+    "@simplewebauthn/server": "^13.0.0",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "ajv": "^8.17.1",
+    "ajv-formats": "^3.0.1",
+    "ws": "^8.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "@types/ws": "^8.18.2",
+    "playwright-core": "^1.65.1",
+    "typescript": "^7.0.2"
+  }
+}

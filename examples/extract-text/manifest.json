@@ -1,0 +1,28 @@
+{
+  "run": {
+    "type": "process",
+    "settings": {
+      "cwd": "/opt/pappai/examples/extract-text",
+      "command": "node",
+      "args": ["extract.cjs"],
+      "features": {
+        "message.extractText": {
+          "type": "method",
+          "description": "Убрать пробелы по краям текста",
+          "version": "1",
+          "schema": {
+            "input": {
+              "type": "object",
+              "required": ["text"],
+              "properties": {"text": {"type": "string"}},
+              "additionalProperties": false
+            },
+            "output": {"type": "string"}
+          }
+        }
+      }
+    }
+  },
+  "executors": {"mode": "oneShot", "poolSize": 1},
+  "subscriptions": []
+}

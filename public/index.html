@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>pappai · Workspace</title>
+    <link rel="stylesheet" href="/style.css" />
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <header>
+      <strong>pappai</strong><span>Workspace</span><button id="logout" hidden>Выйти</button>
+    </header>
+    <main>
+      <section id="signin">
+        <h1>Вход в workspace</h1>
+        <button id="login">Войти с passkey</button>
+        <details>
+          <summary>Зарегистрировать passkey</summary>
+          <form id="activate">
+            <label>Email<input name="email" type="email" autocomplete="email" required /></label>
+            <label>Одноразовый код<input name="code" autocomplete="one-time-code" required /></label>
+            <button>Зарегистрировать</button>
+          </form>
+        </details>
+      </section>
+      <section id="workspace" hidden>
+        <h1>Рабочее пространство</h1>
+        <nav class="terminal-links" aria-label="Терминалы">
+          <a href="/terminal" target="_blank" rel="noopener">Открыть терминал</a>
+          <a id="isolated-terminal" href="/terminal?sandbox=1" target="_blank" rel="noopener" hidden>Открыть в песочнице</a>
+        </nav>
+        <div class="columns">
+          <section>
+            <h2>Ноды</h2>
+            <ul id="nodes"></ul>
+            <button id="refresh">Обновить список</button>
+          </section>
+          <section>
+            <h2>Запрос</h2>
+            <form id="invoke">
+              <label
+                >Операция<select id="operation">
+                  <option>call</option>
+                  <option>help</option>
+                  <option>dir</option>
+                </select></label
+              >
+              <label>Параметры JSON<textarea id="params" rows="9" spellcheck="false">{}</textarea></label
+              ><button>Выполнить</button>
+            </form>
+            <h2>Результат</h2>
+            <pre id="output" aria-live="polite"></pre>
+          </section>
+        </div>
+      </section>
+      <p id="notice" role="status"></p>
+    </main>
+  </body>
+</html>
