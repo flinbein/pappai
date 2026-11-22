@@ -26,3 +26,11 @@ export async function login() {
 export function logout() {
   return post("logout");
 }
+document.getElementById('recovery')?.addEventListener('submit', async event => {
+  event.preventDefault();
+  const email=new FormData(event.currentTarget).get('email');
+  try {
+    await post('recover',{email});
+    document.getElementById('notice').textContent='Если восстановление доступно, код придёт на указанный адрес.';
+  } catch (error) { document.getElementById('notice').textContent=error.message; }
+});

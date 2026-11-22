@@ -42,8 +42,8 @@ async function panel(browser, origin) {
   return page;
 }
 async function register(page, email, code) {
-  await page.locator("details summary").click();
-  await page.getByLabel("Email").fill(email);
+  await page.locator("details").filter({has:page.locator("#activate")}).locator("summary").click();
+  await page.locator("#activate").getByLabel("Email",{exact:true}).fill(email);
   await page.getByLabel("Одноразовый код").fill(code);
   await page.locator("#activate button").click();
   await page.locator("#workspace").waitFor({state:"visible"});
@@ -130,19 +130,24 @@ try {
   await rpc(limited,"call",{node:app,method:"$.app.manifest.get"},/Permission denied/);
   await admin.getByRole('button',{name:'Extract',exact:true}).click({timeout:3000});
   const management = admin.locator('#app-management');
-  const editor = management.getByLabel('Манифест JSON');
+  const editor = management.getByLabel('Источник манифеста JSON');
   const delayed = structuredClone(manifest);
   delayed.run.settings.args = ['-e', `process.stdin.once('data',bytes=>{
     const {id}=JSON.parse(bytes);
     process.on('SIGINT',()=>process.stdout.write(JSON.stringify({id,result:'finished'})+'\\n',()=>process.exit(0)));
     require('fs').writeFileSync('/tmp/stop-ready','1');
   });`];
-  async function save(value) {
-    await editor.fill(JSON.stringify(value,null,2));
+  async function save(source) {
+    await editor.fill(JSON.stringify(source,null,2));
     await management.getByRole('button',{name:'Сохранить манифест'}).click();
     await management.getByText('Манифест сохранён',{exact:true}).waitFor();
   }
-  await save(delayed);
+  const file = '/opt/pappai/examples/extract-text/manifest.json';
+  await save({file,override:{run:{settings:{env:{DEMO:{secret:'browser-test'}}}}}});
+  const saved = JSON.parse(await editor.inputValue());
+  assert.equal(saved.file,file);
+  assert.deepEqual(saved.override.run.settings.env.DEMO,{secret:true});
+  await save({manifest:delayed});
   const backgroundCall = async () => (await admin.request.post(origin+'/rpc',{headers:{Origin:origin},
     data:{jsonrpc:'2.0', id:randomUUID(), method:'call', params:{node:app,method:'message.extractText',data:{text:'wait'}}}})).json();
   const inProgress = backgroundCall();
@@ -161,7 +166,7 @@ try {
   await management.getByText('Остановлена',{exact:true}).waitFor();
   const updated = structuredClone(manifest);
   updated.run.settings.features['message.extractText'].version='2';
-  await save(updated);
+  await save({manifest:updated});
   await management.getByRole('button',{name:'Запустить',exact:true}).click();
   await management.getByText('Работает',{exact:true}).waitFor();
   assert.equal(await rpc(admin,'call',{node:app,method:'message.extractText',version:'2',data:{text:' v2 '}}),'v2');

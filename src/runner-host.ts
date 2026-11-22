@@ -1,13 +1,14 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { Writable, Readable } from 'node:stream';
 import { createInterface } from 'node:readline';
-import type { Assignment } from './runner.ts';
+import type { Assignment, InputRecord, ProcessSettings } from './runner.ts';
 import { sandboxArgs } from './sandbox.ts';
 
 type Worker = {
   appId: string; id: string; child: ChildProcess; executablePid?: number;
   issue?: string; startFailed?: boolean; stopped?: boolean;
   deadline?: NodeJS.Timeout; killTimer?: NodeJS.Timeout;
+  persistent: boolean; holdFirst:boolean; requests: Set<string>;
 };
 
 const workers = new Map<string, Worker>();
@@ -59,6 +60,27 @@ function closeIfIdle() {
   if (closing && !workers.size && process.connected) process.disconnect();
 }
 
+function write(worker:Worker, record:object, onWritten?:()=>void) {
+  const line = JSON.stringify(record) + '\n';
+  const pipe = worker.child.stdin!;
+  if (!pipe.writable || pipe.writableLength > 2 * maxLine || Buffer.byteLength(line) > maxLine) {
+    worker.issue ??= 'Executor stdin unavailable or full';
+    stop(worker);
+    return;
+  }
+  pipe.write(line, err => {
+    if (!err) return onWritten?.();
+    worker.issue ??= 'Executor stdin closed';
+    stop(worker);
+  });
+}
+
+function deliver(worker:Worker, item:InputRecord) {
+  const {from,method,event,id,data,subscription} = item;
+  write(worker, {from,...(method ? {id,method} : {event,subscription}),data}, () =>
+    emit('written',{appId:worker.appId,workerId:worker.id,id}));
+}
+
 function readReplies(worker: Worker) {
   let buffered: Buffer = Buffer.alloc(0);
   const stream = worker.child.stdout!;
@@ -75,12 +97,19 @@ function readReplies(worker: Worker) {
       let msg;
       try { msg = JSON.parse(data.toString('utf8', start, end)); }
       catch { return invalid('invalid JSONL reply'); }
-      if (!msg || msg.id !== worker.id ||
-          Object.hasOwn(msg, 'result') === Object.hasOwn(msg, 'error')) {
-        return invalid('invalid reply or call id');
+      if (!msg || typeof msg.id !== 'string' || !msg.id || msg.id.length > 255)
+        return invalid('invalid reply or request id');
+      if (typeof msg.method === 'string' && !('result' in msg) && !('error' in msg)) {
+        if (worker.requests.size >= 32 || worker.requests.has(msg.id))
+          return invalid('too many pending requests or duplicate id');
+        worker.requests.add(msg.id);
+        emit('request',{appId:worker.appId,workerId:worker.id,id:msg.id,method:msg.method,params:msg.params});
+      } else {
+        if ((!worker.persistent && msg.id !== worker.id) ||
+            Object.hasOwn(msg,'result') === Object.hasOwn(msg,'error')) return invalid('invalid reply or call id');
+        const payload = {appId:worker.appId,id:msg.id,...(worker.persistent && {workerId:worker.id})};
+        emit('reply', 'result' in msg ? {...payload,result:msg.result} : {...payload,error:msg.error});
       }
-      const payload = {appId: worker.appId, id: worker.id};
-      emit('reply', 'result' in msg ? {...payload, result: msg.result} : {...payload, error: msg.error});
       start = end + 1;
     }
     buffered = data.subarray(start);
@@ -91,7 +120,7 @@ function readReplies(worker: Worker) {
   });
 }
 
-function dispatch(job: Assignment) {
+function dispatch(job: Assignment<ProcessSettings>) {
   const {appId, id, settings} = job;
   if (closing || workers.has(id)) throw new Error('runner cannot accept assignment');
   let child: ChildProcess;
@@ -105,7 +134,7 @@ function dispatch(job: Assignment) {
       stdio: ['pipe', 'pipe', 'pipe', 'pipe', 'pipe'], env: {PATH: '/usr/bin:/bin'},
     });
   }
-  const worker: Worker = {appId, id, child};
+  const worker: Worker = {appId, id, child, persistent:job.mode === 'persistent',holdFirst:job.holdFirst === true,requests:new Set()};
   workers.set(id, worker);
   child.on('error', error => {
     worker.issue ??= error.message;
@@ -137,7 +166,7 @@ function dispatch(job: Assignment) {
   child.stdin!.on('error', () => {}); // A child can exit before the first write.
   child.once('spawn', () => {
     emit('started', {id, appId});
-    child.stdin!.write(JSON.stringify({from: job.from, id, method: job.method, data: job.data}) + '\n');
+    if (!worker.holdFirst && !worker.stopped) deliver(worker,job);
     if (job.maxLifetimeMs) worker.deadline = setTimeout(() => {
       worker.issue ??= 'executor lifetime exceeded';
       stop(worker);
@@ -184,9 +213,14 @@ process.on('message', (msg: any) => {
     const worker = workers.get(msg.id);
     if (!worker) return;
     if (msg.type === 'stop') stop(worker);
-    if (msg.type === 'reject' && worker.child.stdin?.writable) {
-      worker.child.stdin.write(JSON.stringify({id: msg.id, error: {message: msg.message}}) + '\n');
+    if (msg.type === 'reject') write(worker,{id:msg.callId,error:{message:msg.message}});
+    if (msg.type === 'notify') write(worker,msg.notification);
+    if (msg.type === 'deliver' && (worker.persistent || worker.holdFirst) && !worker.stopped) {
+      worker.holdFirst = false;
+      deliver(worker,msg.item);
     }
+    if (msg.type === 'response' && worker.requests.delete(msg.requestId))
+      write(worker,{id:msg.requestId,...msg.response});
   }
 });
 process.on('disconnect', close);

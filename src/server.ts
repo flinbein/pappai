@@ -4,7 +4,13 @@ import { mkdirSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { Store } from './store.ts';
-import { ProcessRunner } from './runner.ts';
+import { RunnerRegistry, registryMethods } from './runner-registry.ts';
+import { initTempRoot } from './sandbox.ts';
+import { AppHttpSockets, createAppHttpRouter } from './app-http.ts';
+import { ManifestSources } from './manifest-sources.ts';
+import { FileDelegations } from './file-delegations.ts';
+import { serveUserFiles } from './file-browser.ts';
+import { attachEvents } from './events.ts';
 import { Controller } from './controller.ts';
 import { createAuth } from './auth.ts';
 import { attachTerminals } from './terminal.ts';
@@ -41,24 +47,84 @@ export function createService({ db, origin }: { db: DatabaseSync; origin: string
   const store = new Store(db);
   store.recoverInterruptedStops();
   const auth = createAuth(db, origin);
-  const runner = new ProcessRunner();
-  const controller = new Controller(store, runner);
+  initTempRoot();
+  const runner = new RunnerRegistry(store);
+  const files = new FileDelegations(store);
+  const sockets = new AppHttpSockets();
+  let sources: ManifestSources;
+  const controller = new Controller(store, runner, {
+    executorStart(job) {
+      const fileSocket=files.socketFor(job.id,job.appId);
+      if (fileSocket) {
+        const destination='/run/pappai/files';
+        if (job.sandbox) (job.runtimeMounts ??= []).push({source:fileSocket,target:destination,readonly:true});
+        job.settings={...job.settings,env:{...job.settings.env,PAPPAI_FILES_SOCKET:job.sandbox ? destination : fileSocket}};
+      }
+      if (job.runnerType==='process' && job.mode==='persistent' && store.get(job.appId)?.httpName && store.hasHttp(job.appId)) sockets.start(job);
+    },
+    executorRetire(id) { sockets.retire(id); },
+    executorExit(id,appId) {
+      files.executorExit(id);
+      sockets.exit(id);
+      sources.applyPending(appId);
+    },
+    callOpened:files.callOpened.bind(files), callAssigned:files.callAssigned.bind(files),
+    callClosed:files.callClosed.bind(files), unfinished:files.unfinished.bind(files),
+    executorRequest:files.executorRequest.bind(files),
+    manifestChanged:id=>sources.manifestChanged(id), beforeRestart:id=>sources.applyPending(id),
+    systemNames:type=>type==='workspace'?registryMethods:type==='user'?['$.user.recovery.send']:[],
+    system(actor,node,method,data) {
+      const registry=runner.system(actor,node.id,method,data);
+      if (registry.handled) return registry;
+      if (method==='$.user.recovery.send' && node.type==='user')
+        return {handled:true,result:auth.requestMail(actor,node.id)};
+      if(method==='$.app.start' && node.type==='app' && !runner.available((node.manifest as any)?.run?.type))
+        throw Error('Runner unavailable');
+      return sources.system(actor,node,method,data);
+    },
+  });
+  sources = new ManifestSources(store,{
+    validateSettings:(name,settings)=>runner.validateSettings(name,settings),
+    hasRunner:name=>runner.has(name), isPersistentRunning:id=>controller.isPersistentRunning(id),
+    apply:(id,manifest)=>controller.applyManifest(id,manifest),
+    failed:(id,issue)=>controller.manifestFailed(id,issue),
+    changed:id=>controller.emitSystem(id,'$.app.manifest.sourceChanged',{},id),
+    created:id=>controller.emitSystem(id,'$.node.created',{status:'stopped'}),
+  });
+  runner.on('restarted',name=>controller.runnerRestarted(name));
+  sources.restore();
+  controller.emitSystem('~','$.workspace.init',{});
+  const template=process.env.PAPPAI_APP_HOST_TEMPLATE;
+  const routeApp=template && createAppHttpRouter(template,address.host,name=>{
+    const app=store.getByHttpName(name);
+    if(!app) return undefined;
+    if(app.status!=='working') return null;
+    return store.hasHttp(app.id) ? sockets.socket(app.id) : undefined;
+  });
   const server = createServer(async (req, res) => {
     const path = (req.url ?? '/').split('?')[0];
+    if (req.headers.host !== address.host) {
+      if (routeApp) routeApp(req,res);
+      else res.writeHead(404).end();
+      return;
+    }
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader(
       'Content-Security-Policy',
       "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
     );
-    if (req.headers.host !== address.host) {
-      res.writeHead(404).end();
-      return;
-    }
+
     let id = null;
     try {
       if (await auth.handle(req, res, path)) {
-        if (path === '/auth/logout') terminals.checkSessions();
+        if (path === '/auth/logout') { terminals.checkSessions(); events.checkSessions(); }
+        return;
+      }
+      if (path === '/files' || path.startsWith('/files/')) {
+        const actor=auth.user(req);
+        if(!actor) { res.writeHead(401).end(); return; }
+        await serveUserFiles(store,actor,req,res);
         return;
       }
       if (path === '/terminal') {
@@ -111,6 +177,9 @@ export function createService({ db, origin }: { db: DatabaseSync; origin: string
         case 'help':
           result = controller.help(actor, params);
           break;
+        case 'publish':
+          result = await controller.publish(actor, params, undefined, cancel.signal);
+          break;
         case 'call':
           result = await controller.call(actor, params, cancel.signal);
           break;
@@ -130,10 +199,15 @@ export function createService({ db, origin }: { db: DatabaseSync; origin: string
     }
   });
   const terminals = attachTerminals(server, address, store, auth.user);
+  const events = attachEvents(server,address,store,auth.user,controller);
   async function close() {
     const closed = new Promise<void>((resolve) => server.close(() => resolve()));
+    events.close();
+    sources.close();
+    controller.shutdown();
     server.closeAllConnections();
-    await Promise.all([runner.close(), terminals.close()]);
+    await Promise.all([runner.close(), terminals.close(), auth.close()]);
+    sockets.close();
     await closed;
   }
   return { server, store, controller, runner, close };

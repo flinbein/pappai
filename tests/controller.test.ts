@@ -55,7 +55,7 @@ test('forbidden, invalid version and invalid input are rejected before dispatch'
   await assert.rejects(controller.call('owner', { node: 'app', method, version: '2' }), /version/i);
   await assert.rejects(controller.call('owner', { node: 'app', method, data: 17 }), /schema/i);
   assert.equal(runner.jobs.length, 0);
-  assert.throws(() => prepare({ ...manifest, executors: { mode: 'persistent' } }));
+  assert.throws(() => prepare({ ...manifest, executors: { mode: 'persistent', poolSize: 2 } }));
 });
 test('invalid reply leaves call open and output is accepted only once', async () => {
   const { controller, runner } = fixture();

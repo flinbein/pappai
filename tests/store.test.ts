@@ -98,15 +98,40 @@ test('sandbox intersects path and network grants, null on a restricted branch is
   assert.deepEqual(store.sandbox(limited.id),{read:[],write:[],network:false});
 });
 
-test('unimplemented constraints and invalid filesystem paths are rejected before use', (t) => {
+test('malformed rules and invalid filesystem paths are rejected before use', (t) => {
   const db = new DatabaseSync(':memory:'); t.after(() => db.close());
   const store = new Store(db);
   for (const rule of [
     { node:'!x', methods:true }, { node:'*', methods:true }, {node:'@/**', methods:true},
-    { node:['~','!x'], discover:true }, { methods: { a: { enum:[1,2] } } },
+    { node:['~','!x'], discover:true }, { methods: { a: { type:'unknown' } } },
     { methods:true, customCondition:true }, { write:'/opt/../private' }, { read:'relative' }
   ]) {
     assert.throws(() => store.create('~','app',{name:'bad',manifest:{},permissions:[rule]}));
   }
-  assert.throws(() => store.create('~','app',{name:'bad',manifest:{},permissions:[{read:'/data/secret',deny:true}]}));
+  const app = store.create('~','app',{name:'example',manifest:{},permissions:[{read:'/data/secret',deny:true},{write:'/data'}]});
+  assert.equal(store.allowsFile(app.id,'/data/public',true),true);
+  assert.equal(store.allowsFile(app.id,'/data/secret/x'),false);
+});
+
+test('membership composes grants through the TEAM and preserves restrictions on the member', t=>{
+  const db=new DatabaseSync(':memory:'); t.after(()=>db.close());
+  const store=new Store(db), admin=store.ensureAdmin('owner@example.test');
+  const home=store.create('~','team',{name:'home',permissions:[]});
+  const other=store.create('~','team',{name:'other',permissions:[{methods:'data.save',read:'/shared'}]});
+  const target=store.create('~','app',{name:'storage',manifest:{}});
+  const user=store.create(home.id,'user',{name:'member',email:'member@example.test',
+    permissions:[{methods:{'data.save':{type:'integer'}},read:'/shared'}]});
+  store.setStatus(user.id,'working');
+  const check=(data:unknown)=>store.allows(user.id,target.id,'data.save',data);
+  assert.equal(check(1),false);
+  store.manage(admin.id,other.id,'$.team.members.add',{appId:user.id});
+  assert.equal(check(1),true);
+  assert.equal(check('string'),false);
+  assert.equal(store.selects(other.id,user.id,'./&'),true);
+  assert.equal(store.allowsFile(user.id,'/shared/input'),true);
+  assert.equal(store.allowsFile(user.id,'/shared/input',true),false);
+  assert.equal(store.isAdmin(user.id),false);
+  store.manage(admin.id,user.id,'$.app.memberships.delete',{teamId:other.id});
+  assert.equal(check(1),false);
+  assert.equal(store.allowsFile(user.id,'/shared/input'),false);
 });

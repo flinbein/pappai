@@ -23,10 +23,15 @@
             <button>Зарегистрировать</button>
           </form>
         </details>
+        <details><summary>Получить код по email</summary>
+          <form id="recovery"><label>Адрес для восстановления<input name="email" type="email" autocomplete="email" required></label>
+            <button>Запросить код</button></form>
+        </details>
       </section>
       <section id="workspace" hidden>
         <h1>Рабочее пространство</h1>
         <nav class="terminal-links" aria-label="Терминалы">
+          <a href="/files/" target="_blank" rel="noopener">Файлы</a>
           <a href="/terminal" target="_blank" rel="noopener">Открыть терминал</a>
           <a id="isolated-terminal" href="/terminal?sandbox=1" target="_blank" rel="noopener" hidden>Открыть в песочнице</a>
         </nav>
@@ -48,9 +53,11 @@
               <div class="app-actions">
                 <button id="app-start" type="button">Запустить</button>
                 <button id="app-stop" type="button">Остановить</button>
+                <button id="app-restart" type="button">Перезапустить</button>
                 <button id="app-refresh" type="button">Обновить состояние</button>
               </div>
-              <label for="app-manifest">Манифест JSON</label>
+              <p id="manifest-changed" hidden>Новый манифест ожидает завершения постоянного процесса.</p>
+              <label for="app-manifest">Источник манифеста JSON</label>
               <textarea id="app-manifest" rows="10" spellcheck="false"></textarea>
               <button id="app-save" type="button">Сохранить манифест</button>
               <p id="app-feedback" role="status"></p>

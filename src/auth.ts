@@ -7,6 +7,7 @@ import {
 } from "@simplewebauthn/server";
 import type { RegistrationResponseJSON, AuthenticationResponseJSON } from "@simplewebauthn/server";
 import { Store } from "./store.ts";
+import { sendRecoveryMail } from './recovery-mail.ts';
 
 const minute = 60_000;
 const day = 24 * 60 * minute;
@@ -35,6 +36,10 @@ export function migrateAuth(db: DatabaseSync) {
     CREATE TABLE IF NOT EXISTS enrollment_grants (
       hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE, expires INTEGER NOT NULL
     ) STRICT;
+    CREATE TABLE IF NOT EXISTS email_tokens(user_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE, hash TEXT UNIQUE NOT NULL,expires INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS recovery_requests(user_id TEXT NOT NULL, at INTEGER NOT NULL);
+    CREATE INDEX IF NOT EXISTS recovery_times ON recovery_requests(user_id,at);
+    CREATE TABLE IF NOT EXISTS recovery_principals(hash TEXT PRIMARY KEY, actor TEXT NOT NULL, expires INTEGER NOT NULL);
     CREATE TRIGGER IF NOT EXISTS end_disabled_user_sessions AFTER UPDATE OF status ON nodes
     WHEN NEW.type='user' AND OLD.status='working' AND NEW.status!='working'
     BEGIN
@@ -46,6 +51,7 @@ export function migrateAuth(db: DatabaseSync) {
 // The external admin command holds a single transaction across identity reset and OTP issue.
 export function issueCode(db: DatabaseSync, userId: string, reset = false) {
   if (reset) {
+    db.prepare("DELETE FROM email_tokens WHERE user_id=?").run(userId);
     db.prepare("DELETE FROM passkeys WHERE user_id=?").run(userId);
     db.prepare("DELETE FROM enrollment_grants WHERE user_id=?").run(userId);
   }
@@ -76,7 +82,7 @@ function transaction<T>(db: DatabaseSync, body: () => T): T {
   catch (error) { db.exec("ROLLBACK"); throw error; }
 }
 
-export function createAuth(db: DatabaseSync, publicOrigin: string) {
+export function createAuth(db: DatabaseSync, publicOrigin: string, sendMail = sendRecoveryMail) {
   const store = new Store(db);
   migrateAuth(db);
   const site = new URL(publicOrigin);
@@ -85,6 +91,35 @@ export function createAuth(db: DatabaseSync, publicOrigin: string) {
   const prefix = secure ? "__Host-pappai-" : "pappai-local-";
   type Ceremony = { kind:"login" | "register"; challenge:string; expires:number; grant?:string };
   const pending = new Map<string,Ceremony>();
+  const deliveries = new Set<Promise<void>>();
+  async function deliver(actor:string,targetId:string) {
+    const target = store.get(targetId);
+    if (!target?.email || !store.allowsRecovery(actor,targetId,'$.user.recovery.send')) throw Error('Permission denied');
+    const code=transaction(db,()=>{
+      const now=Date.now();
+      db.prepare('DELETE FROM recovery_requests WHERE at<=?').run(now-day);
+      db.prepare('DELETE FROM recovery_principals WHERE expires<=?').run(now);
+      const stats=db.prepare('SELECT count(*) AS total,max(at) AS latest FROM recovery_requests WHERE user_id=?').get(targetId)!;
+      if (Number(stats.total)>=10 || Number(stats.latest)>now-10*minute) throw Error('Recovery email rate limit');
+      db.prepare('INSERT INTO recovery_requests VALUES(?,?)').run(targetId,now);
+      const value=token();
+      db.prepare("INSERT OR REPLACE INTO email_tokens VALUES(?,?,?)").run(targetId,hash(value),now+10*minute);
+      db.prepare('INSERT INTO recovery_principals VALUES(?,?,?)').run(hash(value),actor,now+10*minute);
+      return value;
+    });
+    try { await sendMail(target.email,code,site.origin); }
+    catch {
+      db.prepare("DELETE FROM email_tokens WHERE user_id=? AND hash=?").run(targetId,hash(code));
+      db.prepare("UPDATE nodes SET lastIssue=? WHERE id=?").run('Recovery email could not be delivered',targetId);
+      throw Error('Recovery email could not be delivered');
+    }
+  }
+  function requestMail(actor:string,id:string) {
+    const task=deliver(actor,id);
+    deliveries.add(task);
+    task.then(()=>deliveries.delete(task),()=>deliveries.delete(task));
+    return task;
+  }
   function cookie(req: IncomingMessage, name: string) {
     const key = prefix + name + "=";
     return req.headers.cookie?.split(";").map(part=>part.trim()).find(part=>part.startsWith(key))?.slice(key.length) ?? "";
@@ -138,6 +173,19 @@ export function createAuth(db: DatabaseSync, publicOrigin: string) {
     if (req.method !== "POST") throw new HttpError(405,"Требуется POST");
     if (req.headers.origin !== site.origin || req.headers.host?.toLowerCase() !== site.host) throw new HttpError(403,"Недопустимый источник запроса");
     const body = await readJSON(req);
+    if (path === '/auth/recover') {
+      // Schedule lookup after returning the same response to every address.
+      const email=typeof body.email==='string'?body.email.trim().toLowerCase():'';
+      if (email.length<=254) {
+        const task=new Promise<void>(resolve=>setImmediate(resolve)).then(async()=>{
+          const target=store.byEmail(email);
+          if (target) await deliver(target.id,target.id);
+        }).catch(()=>{});
+        deliveries.add(task);
+        void task.then(()=>deliveries.delete(task));
+      }
+      return {accepted:true};
+    }
     if (path === "/auth/register/options") {
       if (typeof body.email !== "string") unauthorized();
       const email = body.email.trim().toLowerCase();
@@ -151,7 +199,9 @@ export function createAuth(db: DatabaseSync, publicOrigin: string) {
         grant = hash(recovery);
         transaction(db,() => {
           const consumed = db.prepare("DELETE FROM enrollment_tokens WHERE user_id=? AND hash=? AND expires>?").run(target.id,hash(body.code),Date.now());
-          if (!consumed.changes) unauthorized();
+          if (!consumed.changes && !db.prepare("DELETE FROM email_tokens WHERE user_id=? AND hash=? AND expires>?").run(target.id,hash(body.code),Date.now()).changes) unauthorized();
+          const principal=db.prepare('SELECT actor FROM recovery_principals WHERE hash=?').get(hash(body.code));
+          if (principal) db.prepare('INSERT INTO recovery_principals VALUES(?,?,?)').run(grant,principal.actor,Date.now()+30*minute);
           db.prepare("DELETE FROM enrollment_grants WHERE expires<=?").run(Date.now());
           db.prepare("INSERT INTO enrollment_grants VALUES(?,?,?)").run(grant,target.id,Date.now()+30*minute);
         });
@@ -177,6 +227,8 @@ export function createAuth(db: DatabaseSync, publicOrigin: string) {
       return transaction(db,() => {
         const userId = grantUser(grant);
         if (!userId || db.prepare("SELECT 1 FROM passkeys WHERE id=?").get(credential.id)) unauthorized();
+        const principal=db.prepare('SELECT actor FROM recovery_principals WHERE hash=?').get(grant);
+        if (principal && !store.allowsRecovery(String(principal.actor),userId,'$.user.passkeys.create')) unauthorized();
         db.prepare("INSERT INTO passkeys VALUES(?,?,?,?)").run(credential.id,userId,credential.publicKey,credential.counter);
         db.prepare("DELETE FROM enrollment_grants WHERE hash=?").run(grant);
         setCookie(res,"recovery","",0);
@@ -227,5 +279,5 @@ export function createAuth(db: DatabaseSync, publicOrigin: string) {
     }
     return true;
   }
-  return { handle, user };
+  return { handle, user, requestMail, close:()=>Promise.allSettled([...deliveries]) };
 }

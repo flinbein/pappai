@@ -11,31 +11,34 @@ async function readState(view) {
     rpc('call', {node: view.id, method})));
   if (view !== selection || revision !== view.revision) return;
   el('app-status').textContent = statuses[state.status];
-  el('app-active').textContent = pool.active + ' / ' + pool.limit;
+  el('app-active').textContent = pool.limit === null ? String(pool.active) : pool.active + ' / ' + pool.limit;
   el('app-queued').textContent = pool.queued;
   el('app-issue').hidden = !state.lastIssue;
   el('app-issue').textContent = state.lastIssue ? 'Последняя проблема — ' + state.lastIssue : '';
   el('app-start').disabled = !['stopped','error'].includes(state.status);
   el('app-stop').disabled = !['working','error'].includes(state.status);
+  el('app-restart').disabled = state.status !== 'working' || pool.restarting;
+  el('manifest-changed').hidden = !state.manifestChanged;
 }
 async function selectApp(node) {
   if (selection?.id === node.id) return;
   const view = selection = {id: node.id, revision: 0};
   el('app-management').hidden = false;
   el('app-name').textContent = node.name;
-  for (const key of ['app-start','app-stop','app-save','app-manifest']) el(key).disabled = true;
+  for (const key of ['app-start','app-stop','app-restart','app-save','app-manifest']) el(key).disabled = true;
+  el('manifest-changed').hidden = true;
   for (const key of ['app-status','app-active','app-queued','app-issue','app-feedback']) el(key).textContent = '';
   el('app-manifest').value = '';
   try {
     const [source] = await Promise.all([rpc('call',{node:node.id,method:'$.app.manifest.get'}),readState(view)]);
     if (selection !== view) return;
-    el('app-manifest').value = JSON.stringify(source.manifest,null,2);
+    el('app-manifest').value = JSON.stringify(source,null,2);
     el('app-manifest').disabled = false;
     el('app-save').disabled = false;
   } catch (error) {
     if (selection === view) {
       selection = null;
-      for (const key of ['app-start','app-stop','app-save','app-manifest']) el(key).disabled = true;
+      for (const key of ['app-start','app-stop','app-restart','app-save','app-manifest']) el(key).disabled = true;
       el('app-feedback').textContent = error.message;
     }
   }
@@ -107,7 +110,7 @@ action('logout', 'click', async () => {
 });
 action('refresh', 'click', refresh);
 action('app-refresh', 'click', () => selection && readState(selection));
-for (const command of ['start','stop']) {
+for (const command of ['start','stop','restart']) {
   action('app-' + command, 'click', async () => {
     const view = selection;
     await rpc('call',{node:view.id,method:'$.app.' + command});
@@ -120,9 +123,14 @@ action('app-save', 'click', async () => {
   const editor = el('app-manifest');
   const draft = editor.value;
   try {
-    const source = {manifest: JSON.parse(draft)};
+    const parsed = JSON.parse(draft);
+    const source = parsed && Object.hasOwn(parsed,'run') ? {manifest:parsed} : parsed;
     await rpc('call',{node:view.id,method:'$.app.manifest.set',data:{source}});
-    if (selection === view && editor.value === draft) el('app-feedback').textContent = 'Манифест сохранён';
+    const saved = await rpc('call',{node:view.id,method:'$.app.manifest.get'});
+    if (selection === view && editor.value === draft) {
+      editor.value = JSON.stringify(saved,null,2);
+      el('app-feedback').textContent = 'Манифест сохранён';
+    }
     await readState(view);
   } catch (error) {
     if (selection === view) el('app-feedback').textContent = error.message;

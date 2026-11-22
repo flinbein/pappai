@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
-import { allowsAtLevel, sandboxFor, validatePermissions } from './permits.ts';
-import type { NodeType, Permissions } from './permits.ts';
+import { allowsAtLevel, filesystemProfile, fileLevel, selectsNode, validNodes, validateSchemaSelector, validatePermissions } from './permits.ts';
+import type { Capability, NodeType, Permissions, Rule } from './permits.ts';
 
 export type NodeStatus = 'stopped' | 'working' | 'stopping' | 'error';
 export type NodeRecord = {
@@ -13,6 +13,7 @@ export type NodeRecord = {
   email: string | null;
   permissions: Permissions;
   manifest: unknown;
+  httpName?: string | null;
   lastIssue: string | null;
 };
 
@@ -43,11 +44,6 @@ function lineage<T extends PolicyNode>(node: T, get: (id: string) => T | undefin
   return result;
 }
 
-function permitsTarget(owners: PolicyNode[], targets: string[], type: NodeType, method?: string) {
-  const ids = owners.map(node => node.id);
-  return owners.every((owner, i) => allowsAtLevel(owner.permissions, ids.slice(i), targets, type, ids[0], method));
-}
-
 function activeCaller(node: PolicyNode | undefined): node is PolicyNode {
   return !!node && (node.type === 'user' || node.type === 'app') && node.status === 'working';
 }
@@ -72,6 +68,17 @@ export class Store {
           CHECK((type='user') = (email IS NOT NULL)),
           CHECK(type!='workspace' OR permissions='null')
         ) STRICT;
+        CREATE TABLE IF NOT EXISTS team_members(
+          team TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+          member TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE, PRIMARY KEY(team,member)
+        ) STRICT;
+        CREATE INDEX IF NOT EXISTS memberships_by_member ON team_members(member);
+        CREATE TABLE IF NOT EXISTS personal_subscriptions(
+          node TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE, rules TEXT NOT NULL
+        ) STRICT;
+        CREATE TABLE IF NOT EXISTS http_names(
+          node TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE, name TEXT UNIQUE NOT NULL
+        ) STRICT;
         CREATE INDEX IF NOT EXISTS nodes_parent ON nodes(parentId);
         INSERT INTO nodes(id,type,name,status,permissions) VALUES('~','workspace','workspace','working','null')
           ON CONFLICT(id) DO NOTHING;
@@ -88,7 +95,7 @@ export class Store {
   }
 
   get(id: string): NodeRecord | undefined {
-    const row = this.db.prepare('SELECT * FROM nodes WHERE id=?').get(id);
+    const row = this.db.prepare('SELECT n.*, h.name AS httpName FROM nodes n LEFT JOIN http_names h ON n.id=h.node WHERE n.id=?').get(id);
     return row ? decode(row as SqlNode) : undefined;
   }
 
@@ -150,6 +157,10 @@ export class Store {
       .run('Controller restarted before executor exit was confirmed');
   }
 
+  eventRecipients(): NodeRecord[] {
+    return this.db.prepare("SELECT * FROM nodes WHERE type IN ('app','user') ORDER BY rowid").all().map(row=>decode(row as SqlNode));
+  }
+
   workingApps(): NodeRecord[] {
     return this.db.prepare("SELECT * FROM nodes WHERE type='app' AND status='working'").all().map(row => decode(row as SqlNode));
   }
@@ -158,57 +169,157 @@ export class Store {
     return lineage(node, id => this.get(id));
   }
 
+  private paths(actor: NodeRecord) {
+    const teams = this.db.prepare('SELECT team FROM team_members WHERE member=?').all(actor.id);
+    return [this.chain(actor), ...teams.map(row => [actor, ...this.chain(this.get(String(row.team))!)])];
+  }
+
+  private member = (team: string, id: string) => !!this.db.prepare(
+    'SELECT 1 FROM team_members WHERE team=? AND member=?').get(team,id);
+
+  selects(ownerId: string, targetId: string, selector: Rule['node'] = true, types?: Rule['nodeType'], caller = ownerId) {
+    const owner = this.get(ownerId), target = this.get(targetId);
+    if (!owner || !target || !validNodes(selector)) return false;
+    return selectsNode({node:selector,nodeType:types},this.chain(owner).map(n=>n.id),
+      this.chain(target).map(n=>n.id),target.type,caller,this.member);
+  }
+
+  resolveNodes(owner: string, selector: Rule['node'], types?: Rule['nodeType']) {
+    validateSchemaSelector(selector,types);
+    return this.db.prepare('SELECT id FROM nodes ORDER BY id').all().map(r=>String(r.id))
+      .filter(id=>this.selects(owner,id,selector,types));
+  }
+
   isAdmin(actorId: string): boolean {
     const actor = this.get(actorId);
-    return activeCaller(actor) &&
-      this.chain(actor).every(node => node.permissions === null);
+    return activeCaller(actor) && this.paths(actor).some(chain=>chain.every(n=>n.permissions===null));
+  }
+
+  private filePolicies(node: NodeRecord) {
+    const ids = this.chain(node).map(n=>n.id);
+    return this.paths(node).map(chain=>chain.map(owner=>owner.permissions?.filter(rule=>
+      selectsNode(rule,this.chain(owner).map(n=>n.id),ids,node.type,node.id,this.member)) ?? null));
   }
 
   sandbox(nodeId: string) {
-    const app = this.get(nodeId);
-    if (!app || (app.type !== 'app' && app.type !== 'user')) throw new Error('Unknown APP or USER');
-    return sandboxFor(this.chain(app).map(node => node.permissions));
+    const node = this.get(nodeId);
+    if (!node || (node.type !== 'app' && node.type !== 'user')) throw Error('Unknown APP or USER');
+    return filesystemProfile(this.filePolicies(node));
   }
 
-  private permitted(actorId: string, targetId: string, method?: string): boolean {
-    const actor = this.get(actorId);
-    const target = this.get(targetId);
-    if (!activeCaller(actor) || !target) return false;
-    const targets = this.chain(target).map(node => node.id);
-    return permitsTarget(this.chain(actor), targets, target.type, method);
+  allowsFile(actorId: string, path: string, write = false) {
+    return this.fileSnapshot(actorId).allows(path,write);
   }
 
-  allows(actorId: string, targetId: string, method: string): boolean {
-    return typeof method === 'string' && !!method && this.permitted(actorId, targetId, method);
+  fileSnapshot(actorId:string) {
+    const node=this.get(actorId);
+    if (!node || !['user','app'].includes(node.type)) throw Error('Unknown filesystem principal');
+    const chains=this.filePolicies(node);
+    const sandbox=filesystemProfile(chains);
+    const allows=(path:string,write=false) => {
+      if (!path.startsWith('/') || path.includes('\0') || path.split('/').some(p=>p==='.' || p==='..')) return false;
+      if (path==='/tmp' || path.startsWith('/tmp/')) return true;
+      if (!sandbox) return true;
+      if (['/proc','/dev','/sys','/run'].some(p=>path===p || path.startsWith(p+'/'))) return false;
+      return chains.some(chain=>chain.every(rules=>fileLevel(rules,path)>=(write?2:1)));
+    };
+    return {sandbox,allows};
   }
 
-  canDiscover(actorId: string, targetId: string): boolean {
-    return this.permitted(actorId, targetId);
+  private permitted(actorId: string,targetId: string,capability: Capability,method?:string,data?:unknown,recovery = false, live = false) {
+    const actor = this.get(actorId), target = this.get(targetId);
+    if (!actor || (!(live && actor.type==='app') && !(recovery && actor.type==='user' && actorId===targetId) && !activeCaller(actor)) || !target) return false;
+    const targets = this.chain(target).map(n=>n.id);
+    return this.paths(actor).some(chain=>chain.every(owner=>allowsAtLevel(owner.permissions,
+      this.chain(owner).map(n=>n.id),targets,target.type,actorId,method,capability,data,
+      (selector,types)=>this.resolveNodes(owner.id,selector,types),this.member)));
+  }
+  allowsLiveExecutor(actor:string,target:string,method:string,data?:unknown) {
+    return this.permitted(actor,target,'methods',method,data,false,true);
+  }
+
+  allowsRecovery(actor:string,target:string,method:string) { return this.permitted(actor,target,'methods',method,{},true); }
+
+  allows(actor: string,target: string,method: string,data?:unknown) {
+    return typeof method === 'string' && !!method && this.permitted(actor,target,'methods',method,data);
+  }
+  allowsEvent(receiver:string,source:string,event:string,data?:unknown) {
+    return this.permitted(receiver,source,'events',event,data);
+  }
+  allowsDelivery(actor:string,target:string) { return actor===target || this.permitted(actor,target,'delivery'); }
+  hasHttp(id:string) { return this.permitted(id,id,'http'); }
+  canDiscover(actor:string,target:string) { return this.permitted(actor,target,'discover'); }
+
+  getSubscriptions(id:string): any[] {
+    const row=this.db.prepare('SELECT rules FROM personal_subscriptions WHERE node=?').get(id);
+    return row ? JSON.parse(String(row.rules)) : [];
+  }
+  setSubscriptions(id:string,rules:any[]) {
+    this.db.prepare('INSERT OR REPLACE INTO personal_subscriptions(node,rules) VALUES(?,?)').run(id,JSON.stringify(rules));
+  }
+  getByHttpName(name:string) {
+    const row=this.db.prepare('SELECT node FROM http_names WHERE name=?').get(name);
+    return row ? this.get(String(row.node)) : undefined;
+  }
+  setHttpName(id:string,name:unknown) {
+    if (this.get(id)?.type!=='app') throw Error('Expected an APP');
+    if (name===null) { this.db.prepare('DELETE FROM http_names WHERE node=?').run(id); return; }
+    if (typeof name!=='string' || !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(name)) throw Error('Invalid HTTP name');
+    this.db.prepare('INSERT INTO http_names VALUES(?,?) ON CONFLICT(node) DO UPDATE SET name=excluded.name').run(id,name);
+  }
+  managementNames(type:NodeType) {
+    const names=type==='workspace'?[]:['$.node.permissions.get','$.node.permissions.set'];
+    if(type==='team') names.push(...['list','add','delete'].map(op=>'$.team.members.'+op));
+    if(type==='app'||type==='user') names.push(...['list','add','delete'].map(op=>'$.app.memberships.'+op));
+    if(type==='app') names.push('$.app.http.get','$.app.http.set');
+    return names;
+  }
+  manage(actorId:string,id:string,method:string,data:any): {handled:boolean;result?:any} {
+    const node=this.get(id);
+    if(!node || !this.managementNames(node.type).includes(method)) return {handled:false};
+    if(!this.allows(actorId,id,method,data)) throw Error('Permission denied');
+    let result:any={};
+    if (method==='$.node.permissions.get') result={permissions:node.permissions};
+    else if(method==='$.node.permissions.set') {
+      validatePermissions(data.permissions);
+      this.db.prepare('UPDATE nodes SET permissions=? WHERE id=?').run(JSON.stringify(data.permissions),id);
+    } else if(method==='$.app.http.get') result={name:node.httpName};
+    else if(method==='$.app.http.set') this.setHttpName(id,data.name);
+    else {
+      const onTeam=node.type==='team';
+      if(method.endsWith('.list')) {
+        result=this.db.prepare(onTeam?'SELECT member AS id FROM team_members WHERE team=? ORDER BY member':
+          'SELECT team AS id FROM team_members WHERE member=? ORDER BY team').all(id).map(r=>r.id);
+      } else {
+        const team=onTeam?id:data.teamId, member=onTeam?data.appId:id;
+        if(typeof team!=='string'||typeof member!=='string'||this.get(team)?.type!=='team'||
+          !['app','user'].includes(this.get(member)?.type??'')) throw Error('Expected TEAM and APP or USER');
+        if(method.endsWith('.add')) this.db.prepare('INSERT OR IGNORE INTO team_members VALUES(?,?)').run(team,member);
+        else this.db.prepare('DELETE FROM team_members WHERE team=? AND member=?').run(team,member);
+      }
+    }
+    return {handled:true,result};
   }
 
   visible(actorId: string): DirectoryEntry[] {
-    // One consistent directory view. Credentials, manifests and issues never enter the projection.
-    const index = new Map<string, PolicyNode>();
-    for (const raw of this.db.prepare('SELECT id,parentId,type,name,status,permissions FROM nodes ORDER BY rowid').all()) {
-      const node = raw as Omit<PolicyNode,'permissions'> & {permissions:string};
-      index.set(node.id, {...node, permissions:JSON.parse(node.permissions)});
+    const actor=this.get(actorId);
+    if(!activeCaller(actor)) return [];
+    const index=new Map<string,PolicyNode>();
+    for(const row of this.db.prepare('SELECT id,parentId,type,name,status,permissions FROM nodes ORDER BY rowid').all()){
+      const n=row as Omit<PolicyNode,'permissions'> & {permissions:string};
+      index.set(n.id,{...n,permissions:JSON.parse(n.permissions)});
     }
-    const actor = index.get(actorId);
-    if (!activeCaller(actor)) return [];
-    const lookup = (id: string) => index.get(id);
-    const owners = lineage(actor, lookup);
-    const visible = new Map<string, DirectoryEntry>();
-    for (const node of index.values()) {
-      const targets = lineage(node, lookup);
-      if (!permitsTarget(owners, targets.map(n => n.id), node.type)) continue;
-      for (const ancestor of targets.reverse()) {
-        if (visible.has(ancestor.id)) continue;
-        const {id,parentId,type,name,status} = ancestor;
-        const entry: DirectoryEntry = {id,parentId,type,name};
-        if (type === 'app' || type === 'user') entry.status = status;
-        visible.set(id,entry);
+    const lookup=(id:string)=>index.get(id);
+    const owners=this.paths(actor).map(chain=>chain.map(owner=>({rules:owner.permissions,ids:lineage(owner,lookup).map(n=>n.id)})));
+    const entries=new Map<string,DirectoryEntry>();
+    for(const node of index.values()) {
+      const chain=lineage(node,lookup), ids=chain.map(n=>n.id);
+      if(!owners.some(path=>path.every(o=>allowsAtLevel(o.rules,o.ids,ids,node.type,actorId,undefined,'discover',undefined,undefined,this.member)))) continue;
+      for(const n of chain.reverse()) if(!entries.has(n.id)) {
+        const {id,parentId,type,name,status}=n;
+        entries.set(id,{id,parentId,type,name,...(['app','user'].includes(type)?{status}:{})});
       }
     }
-    return [...visible.values()];
+    return [...entries.values()];
   }
 }

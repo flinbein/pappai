@@ -10,4 +10,5 @@
 !public/*.js
 !examples/extract-text/manifest.json
 !examples/extract-text/extract.cjs
+!examples/webhook/*
 **/*.local.*

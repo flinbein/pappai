@@ -33,6 +33,7 @@ export function attachTerminals(server: Server, address: URL, store: Store, user
   let closing = false;
 
   server.on('upgrade', (req, socket, head) => {
+    if (req.url === '/ws/events') return;
     function reject(status: string) {
       socket.end('HTTP/1.1 ' + status + '\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
     }

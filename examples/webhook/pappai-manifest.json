@@ -1,0 +1,30 @@
+{
+  "run": {
+    "type": "process",
+    "settings": {
+      "command": "node",
+      "args": ["webhook.mjs"],
+      "features": {}
+    }
+  },
+  "executors": {
+    "mode": "persistent",
+    "maxRestarts": 3,
+    "idleTimeoutMs": null
+  },
+  "subscriptions": [
+    {
+      "node": ".",
+      "events": {
+        "$.app.statusChanged": {
+          "type": "object",
+          "properties": {"status": {"const": "working"}},
+          "required": ["status"]
+        }
+      }
+    },
+    {"node": "~", "events": "$.workspace.init"},
+    {"node": ".", "events": "$.app.restarted"},
+    {"node": ".", "events": "$.app.executor.failed"}
+  ]
+}
