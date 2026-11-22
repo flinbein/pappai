@@ -17,5 +17,7 @@
 ## Протоколы
 
 - [Реестр раннеров](runners/registry.md)
+- [Установка раннера Codex и CLI](runners/codex.md)
+- [Профили раннеров](runners/profiles.md) и [подключения MCP](runners/mcp.md)
 - [HTTP и источники манифеста](manifest-http.md)
 - [Передача файлов](runners/files.md)
