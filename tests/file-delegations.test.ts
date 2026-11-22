@@ -190,3 +190,18 @@ test('successful reply, cancellation, timeout and executor loss revoke the assig
     }
   }
 });
+
+test('revoking the caller generation prevents new delegated opens while an already opened file remains usable',linux,async t=>{
+  const {dir,service,socket}=fixture(t);
+  const path=join(dir,'retiring');
+  writeFileSync(path,'before');
+  service.socketFor('sending-worker','caller');
+  t.after(()=>service.executorExit('sending-worker'));
+  service.callOpened('c','caller','target',{read:[path]},'sending-worker');
+  service.callAssigned('c','worker');
+  const open=()=>service.executorRequest('worker','target','files.open',{callId:'c',path,mode:'read'});
+  const {handle}=await open();
+  service.revokeView('sending-worker');
+  await assert.rejects(open(),/denied/);
+  assert.equal((await stream(socket,handle,'GET')).body.toString(),'before');
+});

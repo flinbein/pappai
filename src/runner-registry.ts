@@ -5,12 +5,19 @@ import { pathToFileURL } from 'node:url';
 import { ProcessRunner, type Assignment, type InputRecord } from './runner.ts';
 import type { Store } from './store.ts';
 import { compilePolicySchema } from './policy-schema.ts';
+import { ProfileMethods, type ProfileReader } from './profile-methods.ts';
 
 const operations = ['get','add','disable','enable','restart','delete'];
 export const registryMethods = operations.map(op=>'$.runners.'+op);
 type Entry = {name:string; entrypoint:string|null; enabled:number};
 
 export class RunnerRegistry extends EventEmitter {
+  private profiles = new ProfileMethods();
+  setProfileReader(reader:ProfileReader) { this.profiles.reader=reader; }
+  profileFeatures() { return this.profiles.names(); }
+  profileCall(actor:string,profileId:string,method:string,data:unknown,workerId?:string,signal?:AbortSignal,timeoutMs?:number) {
+    return this.profiles.call(actor,profileId,method,data,workerId,signal,timeoutMs);
+  }
   private store:Store;
   private hosts=new Map<string,ProcessRunner>();
   private owners=new Map<string,{host:ProcessRunner; app:string}>();
@@ -22,7 +29,9 @@ export class RunnerRegistry extends EventEmitter {
     store.db.exec(`CREATE TABLE IF NOT EXISTS installed_runners(name TEXT PRIMARY KEY,entrypoint TEXT,enabled INTEGER NOT NULL);
       INSERT OR IGNORE INTO installed_runners VALUES('process',NULL,1);
       CREATE TABLE IF NOT EXISTS runner_settings_schemas(
-        name TEXT PRIMARY KEY REFERENCES installed_runners(name) ON DELETE CASCADE, schema TEXT NOT NULL)`);
+        name TEXT PRIMARY KEY REFERENCES installed_runners(name) ON DELETE CASCADE, schema TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS runner_host_configs(
+        name TEXT PRIMARY KEY REFERENCES installed_runners(name) ON DELETE CASCADE, config TEXT NOT NULL)`);
     for (const entry of this.entries()) if (entry.enabled) this.start(entry);
   }
   private entries() { return this.store.db.prepare('SELECT * FROM installed_runners ORDER BY name').all() as Entry[]; }
@@ -35,8 +44,10 @@ export class RunnerRegistry extends EventEmitter {
   available(name:string) { return this.hosts.has(name) && !this.busy.has(name); }
   get pid() { return this.hosts.get('process')?.pid; }
   private start(entry:Entry) {
-    const host=new ProcessRunner(entry.entrypoint ? pathToFileURL(entry.entrypoint) : undefined);
+    const row=this.store.db.prepare('SELECT config FROM runner_host_configs WHERE name=?').get(entry.name);
+    const host=new ProcessRunner(entry.entrypoint ? pathToFileURL(entry.entrypoint) : undefined,String(row?.config ?? '{}'));
     this.hosts.set(entry.name,host);
+    if (entry.entrypoint) this.profiles.attach(entry.name,host);
     for(const event of ['request','started','written','reply','exit']) host.on(event,msg=>{
       const key=msg?.workerId ?? msg?.id;
       const owner=this.owners.get(key);
@@ -53,9 +64,11 @@ export class RunnerRegistry extends EventEmitter {
     });
   }
   private forget(host:ProcessRunner) {
+    this.profiles.detach(host);
     for (const [key,owner] of this.owners) if(owner.host===host) this.owners.delete(key);
   }
   private async closeHost(host:ProcessRunner) {
+    this.profiles.detach(host);
     const timer=setTimeout(()=>{ if(host.pid) try { process.kill(host.pid,'SIGKILL'); } catch {} },15_000);
     try { await host.close(); } finally { clearTimeout(timer); this.forget(host); }
   }
@@ -93,6 +106,10 @@ export class RunnerRegistry extends EventEmitter {
     if(typeof name!=='string' || !/^[a-z][a-z0-9_-]{0,63}$/.test(name)) throw Error('Invalid runner name');
     if(this.closing || this.busy.has(name)) throw Error('Runner operation in progress');
     const db=this.store.db;
+    const config=data.config;
+    if (config !== undefined && (!['add','restart'].includes(op) || name==='process' ||
+        !config || typeof config!=='object' || Array.isArray(config))) throw Error('Invalid runner config');
+    const encoded=config===undefined ? undefined : JSON.stringify(config);
     let entry=entries.find(e=>e.name===name);
     if(op==='add') {
       if(entry) throw Error('Runner already installed');
@@ -106,6 +123,7 @@ export class RunnerRegistry extends EventEmitter {
         db.prepare('INSERT INTO installed_runners VALUES(?,?,1)').run(name,entrypoint);
         if (data.settingsSchema !== undefined) db.prepare('INSERT INTO runner_settings_schemas VALUES(?,?)')
           .run(name,JSON.stringify(data.settingsSchema));
+        if (encoded) db.prepare('INSERT INTO runner_host_configs VALUES(?,?)').run(name,encoded);
         this.start(entry);
         db.exec('RELEASE add_runner');
       } catch (error) {
@@ -128,6 +146,7 @@ export class RunnerRegistry extends EventEmitter {
       }
       if(op==='delete') db.prepare('DELETE FROM installed_runners WHERE name=?').run(name);
       else {
+        if (encoded) db.prepare('INSERT OR REPLACE INTO runner_host_configs VALUES(?,?)').run(name,encoded);
         const enabled=Number(op!=='disable');
         db.prepare('UPDATE installed_runners SET enabled=? WHERE name=?').run(enabled,name);
         if(enabled && !this.closing) {

@@ -1,16 +1,16 @@
 import { randomUUID } from 'node:crypto';
 import { closeSync, createReadStream, createWriteStream, fstatSync, ftruncateSync, mkdtempSync,
-  rmdirSync } from 'node:fs';
+  rmdirSync, readSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
-import { join, posix } from 'node:path';
+import { isAbsolute, join, posix } from 'node:path';
 import { pipeline } from 'node:stream/promises';
-import { openRegularFile, type FileMode } from './file-view.ts';
+import { openReadFile, openRegularFile, type FileMode } from './file-view.ts';
 import { sandboxPrivateTmp } from './sandbox.ts';
 import type { Store } from './store.ts';
 
 type FileGrants = Record<FileMode, string[]>;
-type FileView = ReturnType<Store['fileSnapshot']>;
+type FileView = ReturnType<Store['fileSnapshot']> & {unmappedTmp?:boolean; revoked?:boolean};
 type Call = {
   actor: string; target: string; executor?: string; callerView?: FileView; grants: FileGrants;
   abort: AbortController; handles: Map<string, Handle>; copies: number;
@@ -96,11 +96,11 @@ export class FileDelegations {
 
   // listen(path) binds a Unix socket before returning. Each mount belongs to
   // a single executor generation; it cannot authenticate with another mount.
-  socketFor(executor: string, app?: string): string | undefined {
+  socketFor(executor: string, app?: string, unmappedTmp=false): string | undefined {
     if (process.platform !== 'linux') return;
     const existing = this.endpoints.get(executor);
     if (existing) return existing.path;
-    const view = app === undefined ? undefined : this.store.fileSnapshot(app);
+    const view = app === undefined ? undefined : {...this.store.fileSnapshot(app),unmappedTmp};
     const dir = mkdtempSync(join(tmpdir(), 'pappai-files-'));
     const path = join(dir, 'socket');
     const server = createServer({maxHeaderSize: 4096}, (req, res) => {
@@ -116,6 +116,11 @@ export class FileDelegations {
     return path;
   }
 
+  revokeView(executor:string) {
+    const view=this.endpoints.get(executor)?.view;
+    if (view) view.revoked=true;
+  }
+
   executorExit(executor: string, _appId?: string) {
     for (const [id, call] of this.calls) if (call.executor === executor) this.callClosed(id);
     const endpoint = this.endpoints.get(executor);
@@ -128,6 +133,7 @@ export class FileDelegations {
   }
 
   private open(actor: string, path: string, mode: FileMode, mounted?: FileView) {
+    if (mounted?.revoked) throw Error('File access denied');
     const current = this.store.fileSnapshot(actor);
     const allows = (name: string, write: boolean) => current.allows(name, write) &&
       (!mounted || mounted.allows(name, write));
@@ -135,7 +141,7 @@ export class FileDelegations {
         !allows(path, mode !== 'read')) throw Error('File access denied');
     // Mounts outlive a permissions change. A new sandbox's private /tmp
     // cannot authorize opening the host /tmp of an older trusted process.
-    if (path.startsWith('/tmp/') && mounted?.sandbox === null && current.sandbox !== null)
+    if (path.startsWith('/tmp/') && (mounted?.unmappedTmp || mounted?.sandbox === null && current.sandbox !== null))
       throw Error('File access denied');
     const actual = path.startsWith('/tmp/') && (mounted ?? current).sandbox !== null
       ? join(sandboxPrivateTmp(actor), path.slice('/tmp/'.length)) : path;
@@ -144,6 +150,32 @@ export class FileDelegations {
     if (mode === 'create' && !canCreate) throw Error('File creation denied');
     try { return openRegularFile(actual, mode, canCreate); }
     catch (err) { throw Error((err as NodeJS.ErrnoException).code ?? 'Expected an ordinary file'); }
+  }
+
+  readProfileFile(actor:string, path:string, workerId?:string) {
+    const endpoint=workerId ? this.endpoints.get(workerId) : undefined;
+    if (workerId && (!endpoint?.view || endpoint.app!==actor)) throw Error('Unknown caller file view');
+    let fd:number;
+    if (process.platform==='linux') fd=this.open(actor,filePath(path),'read',endpoint?.view);
+    else {
+      if (workerId || this.store.fileSnapshot(actor).sandbox!==null || typeof path!=='string' || !isAbsolute(path))
+        throw Error('File access denied');
+      fd=openReadFile(path,()=>true);
+    }
+    try {
+      const max=1024*1024;
+      const size=fstatSync(fd).size;
+      if (size>max) throw Error('Profile input exceeds 1 MiB');
+      const bytes=Buffer.alloc(size+1);
+      let used=0;
+      while (used<bytes.length) {
+        const count=readSync(fd,bytes,used,bytes.length-used,null);
+        if (!count) break;
+        used+=count;
+      }
+      if (used!==size) throw Error('Profile input changed during read');
+      return bytes.subarray(0,used);
+    } finally { closeSync(fd); }
   }
 
   async executorRequest(executor: string, app: string, method: string, params: any) {

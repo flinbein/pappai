@@ -15,8 +15,8 @@ type Pending = {
   resolve:(value:unknown)=>void; reject:(issue:Error)=>void; timer:NodeJS.Timeout;
 };
 type Worker = {
-  id:string; appId:string; runnerType:string; persistent:boolean; started:boolean;
-  retiring:boolean; stopRequested?:boolean; writing?:string; calls:Set<string>; requests:number; abort:AbortController;
+  id:string; appId:string; profileId?:string; sandboxState?:string; runnerType:string; persistent:boolean; started:boolean;
+  retiring:boolean; profileRevoked?:boolean; stopRequested?:boolean; writing?:string; calls:Set<string>; requests:number; abort:AbortController;
   idleTimeoutMs?:number|null; idle?:NodeJS.Timeout; first?:Work; maxRestarts:number;
 };
 type Config = ReturnType<typeof prepare>;
@@ -24,9 +24,12 @@ type Runner = Pick<EventEmitter,'on'> & Pick<ProcessRunner,'dispatch'|'stop'|'re
 export type ControllerHooks = {
   system?:(actor:string,node:NonNullable<ReturnType<Store['get']>>,method:string,data:any)=>{handled:boolean;result?:any}|undefined;
   systemNames?:(type:NonNullable<ReturnType<Store['get']>>['type'])=>string[];
+  profileCall?:(actor:string,profileId:string,method:string,data:any,callerWorkerId?:string,signal?:AbortSignal,timeoutMs?:number)=>Promise<unknown>;
+  profileFeatures?:()=>string[];
   manifestChanged?:(appId:string)=>boolean;
   beforeRestart?:(appId:string)=>void;
   executorStart?:(job:Assignment)=>void;
+  executorProfileRevoked?:(workerId:string)=>void;
   executorRetire?:(workerId:string,appId:string)=>void;
   executorExit?:(workerId:string,appId:string)=>void;
   callOpened?:(id:string,actor:string,target:string,params:any,callerWorkerId?:string)=>void;
@@ -90,6 +93,7 @@ export class Controller {
       const worker = this.workers.get(id);
       if (!worker || worker.appId !== appId) return;
       worker.started = true;
+      if (worker.profileId) this.revalidateProfiles();
       if (!worker.first || worker.retiring) return;
       const item = worker.first;
       worker.first = undefined;
@@ -241,6 +245,24 @@ export class Controller {
       catch (error) { this.exited({id:worker.id,appId:worker.appId,stopFailed:true,issue:(error as Error).message}); }
     }
   }
+  private revalidateProfiles() {
+    for (const worker of [...this.workers.values()]) {
+      const app=this.store.get(worker.appId);
+      if (!app || (!app.profile && !worker.profileId)) continue;
+      const changed=(app.profile ?? undefined)!==worker.profileId;
+      let denied=false;
+      try {
+        this.store.profileFor(app);
+        if (!changed && worker.sandboxState===JSON.stringify(this.store.sandbox(app.id))) continue;
+      } catch { denied=true; }
+      if (!worker.profileRevoked) {
+        worker.profileRevoked=true;
+        this.hooks.executorProfileRevoked?.(worker.id);
+      }
+      this.retire(worker,true);
+      if (!changed && denied && worker.persistent) this.failApp(app.id,'Profile does not permit this APP');
+    }
+  }
   private release(worker:Worker,issue:string) {
     this.workers.delete(worker.id);
     this.reports.finish(worker.writing,worker.first ? 'rejected' : 'unknown');
@@ -249,7 +271,7 @@ export class Controller {
     for (const id of worker.calls) this.finish(id,Error(issue));
     this.hooks.executorExit?.(worker.id,worker.appId);
   }
-  private exited(message:{id:string;appId:string;issue?:string;startFailed?:boolean;stopFailed?:boolean}) {
+  private exited(message:{id:string;appId:string;issue?:string;startFailed?:boolean;stopFailed?:boolean;permanent?:boolean}) {
     const {appId} = message;
     const alreadyReleasing = this.releasing.has(appId);
     this.releasing.add(appId);
@@ -261,7 +283,7 @@ export class Controller {
       }
     }
   }
-  private handleExit({id,appId,issue,startFailed,stopFailed}:any) {
+  private handleExit({id,appId,issue,startFailed,stopFailed,permanent}:any) {
     const worker = this.workers.get(id);
     if (!worker || worker.appId !== appId) return;
     const reason = issue ?? (worker.calls.size ? 'Executor exited without a reply' : undefined);
@@ -278,7 +300,7 @@ export class Controller {
     if (this.restarting.has(appId) && !this.isPersistentRunning(appId)) this.completeRestart(appId);
     else if (!worker.retiring && reason) {
       this.status(appId,'working',reason);
-      if (startFailed && !worker.persistent) { this.failApp(appId,reason); return; }
+      if (startFailed && (!worker.persistent || permanent)) { this.failApp(appId,reason); return; }
       if (worker.persistent) {
         const previous = this.failures.get(appId) ?? 0;
         this.failures.set(appId,previous + 1);
@@ -310,6 +332,14 @@ export class Controller {
     this.next(appId);
     return true;
   }
+  private assignCall(id:string,worker:Worker) {
+    const pending=this.pending.get(id);
+    if (!pending) return;
+    worker.calls.add(id);
+    pending.worker=worker.id;
+    clearTimeout(worker.idle);
+    this.hooks.callAssigned?.(id,worker.id);
+  }
   private next(appId:string) {
     const queue = this.queues.get(appId);
     if (this.closing || !queue?.length || this.restarting.has(appId) || this.releasing.has(appId) ||
@@ -320,29 +350,30 @@ export class Controller {
     const existing = current.find(w=>w.persistent);
     if (existing && (existing.retiring || existing.writing || config.mode !== 'persistent')) return;
     if (!existing && current.length >= config.poolSize) return;
+    const app=this.store.get(appId)!;
+    if (app.profile) {
+      try { this.store.profileFor(app); }
+      catch (err) { this.failApp(appId,(err as Error).message); return; }
+    }
     const item = queue.shift()!;
     if (!queue.length) this.queues.delete(appId);
     const worker:Worker = existing ?? {
-      id:item.id,appId,runnerType:config.runnerType,persistent:config.mode === 'persistent',started:false,
+      id:item.id,appId,profileId:app.profile ?? undefined,runnerType:config.runnerType,persistent:config.mode === 'persistent',started:false,
       retiring:false,calls:new Set(),requests:0,abort:new AbortController(),idleTimeoutMs:config.idleTimeoutMs,
-      maxRestarts:config.maxRestarts ?? 0,first:config.runnerType === 'process' ? item : undefined,
+      maxRestarts:config.maxRestarts ?? 0,first:config.runnerType === 'process' || app.profile ? item : undefined,
     };
     this.workers.set(worker.id,worker);
     worker.writing = item.id;
     clearTimeout(worker.idle);
     try {
-      const call = this.pending.get(item.id);
-      if (call) {
-        worker.calls.add(item.id);
-        call.worker = worker.id;
-        this.hooks.callAssigned?.(item.id,worker.id);
-      }
+      this.assignCall(item.id,worker);
       if (existing) this.runner.deliver(worker.id,item);
       else {
         const {priority,canEvict,...input} = item;
-        const job:Assignment = {...input,appId,runnerType:config.runnerType,mode:config.mode,
+        const job:Assignment = {...input,appId,...(worker.profileId && {profileId:worker.profileId}),runnerType:config.runnerType,mode:config.mode,
           holdFirst:!!worker.first,settings:{...config.settings,...(config.settings.env && {env:{...config.settings.env}})},
           sandbox:this.store.sandbox(appId),maxLifetimeMs:config.maxLifetimeMs};
+        if (worker.profileId) worker.sandboxState=JSON.stringify(job.sandbox);
         this.hooks.executorStart?.(job);
         this.runner.dispatch(job);
       }
@@ -364,6 +395,8 @@ export class Controller {
     if (!permitted) throw Error('Permission denied');
     const app = this.store.get(appId);
     if (!app) throw Error('Node not found');
+    if (app.type==='profile' && !method.startsWith('$.') && this.hooks.profileCall)
+      return this.hooks.profileCall(actor,app.id,method,data ?? {},worker?.id,signal,params.timeoutMs);
     if (method.startsWith('$.')) return this.system(actor,app,method,data ?? {});
     if (app.type !== 'app' || app.status !== 'working') throw Error('APP is not working');
     const config = this.config(appId);
@@ -373,17 +406,38 @@ export class Controller {
     const timeout = params.timeoutMs ?? DAY;
     if (!Number.isInteger(timeout) || timeout < 1 || timeout > DAY) throw Error('Invalid timeout');
     if (signal?.aborted) throw Error('Call cancelled');
+    // Interrupting a busy turn cannot wait behind that same turn in the queue.
+    let interrupt:Worker|undefined;
+    if (config.runnerType==='codex' && config.mode==='persistent' && method==='agent.interrupt') {
+      if (app.profile) this.store.profileFor(app);
+      interrupt=this.instances(appId).find(w=>w.runnerType==='codex' && w.persistent && w.started && !w.retiring &&
+        w.profileId===(app.profile ?? undefined));
+      if (!interrupt) throw Error('No active Codex turn');
+      if (interrupt.calls.size>=100) throw Error('Too many pending calls');
+    }
     const id = randomUUID();
     const feature = config.features.get(method)!;
-    const item = {id,from:actor,method,data,priority:feature.priority ?? 0,canEvict:feature.canEvict ?? false};
-    const abort = () => this.finish(id,Error('Call cancelled'));
+    const item = {id,from:actor,method,data,...(feature.schema?.output !== undefined && {outputSchema:feature.schema.output}),priority:feature.priority ?? 0,canEvict:feature.canEvict ?? false};
+    const cancel = (issue:string) => {
+      const assigned=this.pending.get(id)?.worker;
+      if (!interrupt && assigned && this.workers.get(assigned)?.runnerType!=='process') {
+        try { this.runner.notify(assigned,{cancelled:id}); } catch { /* Runner disconnected. */ }
+      }
+      this.finish(id,Error(issue));
+    };
+    const abort = () => cancel('Call cancelled');
     this.hooks.callOpened?.(id,actor,appId,params,worker?.id);
     try {
       return await new Promise((resolve,reject) => {
-        const timer = setTimeout(()=>this.finish(id,Error('Call timed out')),timeout);
+        const timer = setTimeout(()=>cancel('Call timed out'),timeout);
         this.pending.set(id,{appId,item,version,timer,resolve,reject});
         signal?.addEventListener('abort',abort,{once:true});
-        if (!this.enqueue(appId,item)) this.finish(id,Error('Queue full'));
+        if (interrupt) {
+          try {
+            this.assignCall(id,interrupt);
+            this.runner.notify(interrupt.id,{interrupt:id});
+          } catch (error) { this.finish(id,error as Error); }
+        } else if (!this.enqueue(appId,item)) this.finish(id,Error('Queue full'));
       });
     } finally { signal?.removeEventListener('abort',abort); }
   }
@@ -394,6 +448,9 @@ export class Controller {
     worker.requests++;
     let response:{result?:unknown;error?:unknown};
     try {
+      if (worker.profileRevoked || worker.profileId!==(this.store.get(appId)?.profile ?? undefined))
+        throw Error('Profile access revoked');
+      if (worker.profileId) this.store.profileFor(this.store.get(appId)!);
       let result;
       switch (method) {
         case 'call': result = await this.invoke(appId,params,worker.abort.signal,worker); break;
@@ -509,6 +566,7 @@ export class Controller {
     if (external?.handled) return external.result;
     const managed = this.store.manage?.(actor,node.id,method,data);
     if (managed?.handled) {
+      if (!method.endsWith('.get') && !method.endsWith('.list')) this.revalidateProfiles();
       if (method === '$.node.permissions.set') this.emitSystem(node.id,'$.node.permissions.updated',{});
       return managed.result;
     }
@@ -524,13 +582,13 @@ export class Controller {
       }
       return {};
     }
-    if (['$.app.create','$.team.create','$.user.create'].includes(method)) {
-      if (!this.store.isAdmin(actor)) throw Error('Permission denied');
+    if (['$.app.create','$.team.create','$.user.create','$.profile.create'].includes(method)) {
+      if (method!=='$.profile.create' && !this.store.isAdmin(actor)) throw Error('Permission denied');
       if (!['workspace','team'].includes(node.type)) throw Error('Parent must be a workspace or TEAM');
-      const type = method.split('.')[1] as 'app'|'team'|'user';
+      const type = method.split('.')[1] as 'app'|'team'|'user'|'profile';
       const config = type === 'app' ? prepare(data.source?.manifest) : undefined;
       const created = this.store.create(node.id,type,{
-        name:data.name,email:data.email,...(Object.hasOwn(data,'permissions') ? {permissions:data.permissions} : {}),
+        name:data.name,email:data.email,profile:data.profile,scope:data.scope,...(Object.hasOwn(data,'permissions') ? {permissions:data.permissions} : {}),
         ...(config ? {manifest:data.source.manifest} : {}),
       });
       if (config) this.configs.set(created.id,config);
@@ -554,7 +612,7 @@ export class Controller {
       const workers = this.instances(node.id);
       switch (method) {
         case '$.app.get':
-          return {status:node.status,lastIssue:node.lastIssue,manifestChanged:this.hooks.manifestChanged?.(node.id) ?? false};
+          return {status:node.status,lastIssue:node.lastIssue,...(node.profile && {profile:node.profile}),manifestChanged:this.hooks.manifestChanged?.(node.id) ?? false};
         case '$.app.executors.get': {
           const config = this.config(node.id);
           return {mode:config.mode,active:workers.length,limit:config.mode === 'persistent' ? null : config.poolSize,
@@ -595,8 +653,8 @@ export class Controller {
     const entries = new Map(app.type === 'app' ? this.config(app.id).features : []);
     const core =
       app.type === 'workspace' || app.type === 'team'
-        ? ['$.team.create', '$.user.create', '$.app.create']
-        : app.type === 'app' ? appMethods : ['$.app.start'];
+        ? ['$.team.create', '$.user.create', '$.app.create', '$.profile.create']
+        : app.type === 'app' ? appMethods : app.type==='profile' ? this.hooks.profileFeatures?.() ?? [] : ['$.app.start'];
     for (const name of [...core,...(this.store.managementNames?.(app.type) ?? []),...(this.hooks.systemNames?.(app.type) ?? [])])
       entries.set(name, {
         type: 'method',

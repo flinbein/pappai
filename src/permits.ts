@@ -2,7 +2,7 @@ import { lstatSync } from 'node:fs';
 import { posix } from 'node:path';
 import {compilePolicySchema,type ResolveNodes} from './policy-schema.ts';
 
-export type NodeType = 'workspace' | 'team' | 'user' | 'app';
+export type NodeType = 'workspace' | 'team' | 'user' | 'app' | 'profile';
 export type NodeSelector = string | boolean;
 type NameSelector = string | string[] | boolean;
 type MessageSelector = NameSelector | Record<string, unknown>;
@@ -22,7 +22,7 @@ export type Rule = {
 };
 export type Permissions = Rule[] | null;
 
-const nodeTypes = ['workspace', 'team', 'user', 'app'];
+const nodeTypes = ['workspace', 'team', 'user', 'app', 'profile'];
 const knownFields = new Set(['node','nodeType','methods','events','discover','delivery','network','http','read','write','deny']);
 const nodePattern = /^(?:@|(?:~|[A-Za-z0-9_-]+|\.|\.\.(?:\/\.\.)*)(?:\/(?:\*{1,2}|&))?)$/;
 
@@ -197,16 +197,17 @@ export function fileLevel(rules: Permissions, path: string): number {
   return read ? (write ? 2 : 1) : 0;
 }
 
-export function filesystemProfile(chains: Permissions[][]) {
-  if (chains.some(chain => chain.every(r => r === null))) return null;
+export function filesystemProfile(...subjects: Permissions[][][]) {
+  if (subjects.every(chains => chains.some(chain => chain.every(r => r === null)))) return null;
   const anchors = new Set<string>(minimalPaths);
-  for (const chain of chains) for (const rules of chain) for (const rule of rules ?? []) {
+  for (const chain of subjects.flat()) for (const rules of chain) for (const rule of rules ?? []) {
     for (const path of [...paths(rule.read),...paths(rule.write)]) anchors.add(path);
   }
   const levels = new Map<string,number>();
   const read: string[] = [], write: string[] = [], hide: string[] = [];
   for (const path of [...anchors].sort((a,b) => a.length-b.length)) {
-    const level = Math.max(...chains.map(chain => Math.min(...chain.map(rules => fileLevel(rules,path)))));
+    const level = Math.min(...subjects.map(chains=>Math.max(...chains.map(chain =>
+      Math.min(...chain.map(rules => fileLevel(rules,path)))))));
     let inherited = minimalPaths.includes(path) ? 1 : 0;
     for (const [parent,l] of levels) if (contains(parent,path)) inherited = l;
     // The runner always supplies the minimal mounts, even under a broader parent.
@@ -214,8 +215,8 @@ export function filesystemProfile(chains: Permissions[][]) {
     levels.set(path,level);
     if (level !== inherited) (level === 2 ? write : level === 1 ? read : hide).push(path);
   }
-  const network = chains.some(chain => chain.every(rules =>
-    rules === null || rules.filter(r => r.network).slice(0,1).some(r => !r.deny)));
+  const network = subjects.every(chains=>chains.some(chain => chain.every(rules =>
+    rules === null || rules.filter(r => r.network).slice(0,1).some(r => !r.deny))));
   return {read,write,network,...(hide.length ? {hide} : {})};
 }
 export function sandboxFor(chain: Permissions[]) { return filesystemProfile([chain]); }

@@ -262,7 +262,7 @@ export class ManifestSources {
     try {
       // Read a file using the new APP's actual permission chain before publishing it.
       if (create) {
-        node = this.store.create(node.id,'app',{name:data.name,permissions:data.permissions,manifest:{}});
+        node = this.store.create(node.id,'app',{name:data.name,permissions:data.permissions,profile:data.profile,manifest:{}});
         if (data.httpName !== undefined) this.store.setHttpName(node.id,data.httpName);
       }
       // A delegated installation can be restricted to a package by the source

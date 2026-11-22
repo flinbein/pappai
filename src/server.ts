@@ -54,14 +54,15 @@ export function createService({ db, origin }: { db: DatabaseSync; origin: string
   let sources: ManifestSources;
   const controller = new Controller(store, runner, {
     executorStart(job) {
-      const fileSocket=files.socketFor(job.id,job.appId);
-      if (fileSocket) {
+      const fileSocket=files.socketFor(job.id,job.appId,job.runnerType==='codex');
+      if (fileSocket && job.runnerType!=='codex') {
         const destination='/run/pappai/files';
         if (job.sandbox) (job.runtimeMounts ??= []).push({source:fileSocket,target:destination,readonly:true});
         job.settings={...job.settings,env:{...job.settings.env,PAPPAI_FILES_SOCKET:job.sandbox ? destination : fileSocket}};
       }
       if (job.runnerType==='process' && job.mode==='persistent' && store.get(job.appId)?.httpName && store.hasHttp(job.appId)) sockets.start(job);
     },
+    executorProfileRevoked:id=>files.revokeView(id),
     executorRetire(id) { sockets.retire(id); },
     executorExit(id,appId) {
       files.executorExit(id);
@@ -72,6 +73,8 @@ export function createService({ db, origin }: { db: DatabaseSync; origin: string
     callClosed:files.callClosed.bind(files), unfinished:files.unfinished.bind(files),
     executorRequest:files.executorRequest.bind(files),
     manifestChanged:id=>sources.manifestChanged(id), beforeRestart:id=>sources.applyPending(id),
+    profileFeatures:()=>runner.profileFeatures(),
+    profileCall:(...args)=>runner.profileCall(...args),
     systemNames:type=>type==='workspace'?registryMethods:type==='user'?['$.user.recovery.send']:[],
     system(actor,node,method,data) {
       const registry=runner.system(actor,node.id,method,data);
@@ -82,6 +85,11 @@ export function createService({ db, origin }: { db: DatabaseSync; origin: string
         throw Error('Runner unavailable');
       return sources.system(actor,node,method,data);
     },
+  });
+  runner.setProfileReader((actor,path,worker)=>{
+    if (store.get(actor)?.status!=='working' || (worker && !controller.isCurrentExecutor(actor,worker)))
+      throw Error('Inactive caller');
+    return files.readProfileFile(actor,path,worker);
   });
   sources = new ManifestSources(store,{
     validateSettings:(name,settings)=>runner.validateSettings(name,settings),
