@@ -39,7 +39,20 @@ function stop(worker: Worker) {
   if (worker.stopped) return;
   worker.stopped = true;
   signal(worker, 'SIGINT');
-  worker.killTimer = setTimeout(() => signal(worker, 'SIGKILL'), 10000);
+  worker.killTimer = setTimeout(() => {
+    signal(worker, 'SIGKILL');
+    worker.killTimer = setTimeout(() => {
+      if (worker.child.exitCode !== null || worker.child.signalCode !== null) return;
+      // Revoke the protocol even if the OS still holds the process.
+      workers.delete(worker.id);
+      clearTimeout(worker.deadline);
+      for (const pipe of worker.child.stdio) pipe?.destroy();
+      worker.child.unref();
+      emit('exit', {id: worker.id, appId: worker.appId, stopFailed: true,
+        issue: 'Executor exit after SIGKILL could not be confirmed'});
+      closeIfIdle();
+    }, 1000);
+  }, 10000);
 }
 
 function closeIfIdle() {
@@ -140,6 +153,7 @@ function dispatch(job: Assignment) {
     child.once('close', () => clearTimeout(drain));
   });
   child.once('close', (code, signame) => {
+    if (!workers.has(id)) return;
     clearTimeout(worker.deadline);
     clearTimeout(worker.killTimer);
     workers.delete(id);

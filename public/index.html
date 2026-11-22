@@ -37,6 +37,24 @@
             <button id="refresh">Обновить список</button>
           </section>
           <section>
+            <section id="app-management" hidden aria-labelledby="app-name">
+              <h2 id="app-name"></h2>
+              <dl class="app-state">
+                <div><dt>Статус</dt><dd id="app-status"></dd></div>
+                <div><dt>Занято слотов</dt><dd id="app-active"></dd></div>
+                <div><dt>В очереди</dt><dd id="app-queued"></dd></div>
+              </dl>
+              <p id="app-issue" hidden></p>
+              <div class="app-actions">
+                <button id="app-start" type="button">Запустить</button>
+                <button id="app-stop" type="button">Остановить</button>
+                <button id="app-refresh" type="button">Обновить состояние</button>
+              </div>
+              <label for="app-manifest">Манифест JSON</label>
+              <textarea id="app-manifest" rows="10" spellcheck="false"></textarea>
+              <button id="app-save" type="button">Сохранить манифест</button>
+              <p id="app-feedback" role="status"></p>
+            </section>
             <h2>Запрос</h2>
             <form id="invoke">
               <label

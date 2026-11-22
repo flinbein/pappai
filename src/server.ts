@@ -39,6 +39,7 @@ async function body(req: IncomingMessage) {
 export function createService({ db, origin }: { db: DatabaseSync; origin: string }) {
   const address = new URL(origin);
   const store = new Store(db);
+  store.recoverInterruptedStops();
   const auth = createAuth(db, origin);
   const runner = new ProcessRunner();
   const controller = new Controller(store, runner);
@@ -72,7 +73,8 @@ export function createService({ db, origin }: { db: DatabaseSync; origin: string
       res.setHeader('Content-Type', 'application/json; charset=utf-8');
       if (path === '/session' && req.method === 'GET') {
         const actor = auth.user(req, false);
-        res.end(JSON.stringify({ user: actor, canChooseSandbox: !!actor && store.isAdmin(actor) }));
+        const admin = !!actor && store.isAdmin(actor);
+        res.end(JSON.stringify({ user: actor, canChooseSandbox: admin, canManageApps: admin }));
         return;
       }
       if (path !== '/rpc' || req.method !== 'POST') {

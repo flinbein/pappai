@@ -36,6 +36,26 @@ test('runner binds replies to the assigned call and refuses foreign ids', {timeo
   assert.equal(replies, 0);
 });
 
+test('a sandboxed process ignoring SIGINT is forcibly stopped after the grace period', {
+  skip: process.env.PAPPAI_TEST_BWRAP !== '1', timeout: 20000,
+}, async t => {
+  const runner = new ProcessRunner();
+  t.after(() => runner.close());
+  const ready = once(runner, 'reply');
+  const exit = once(runner, 'exit');
+  const job = assignment(`process.on('SIGINT',()=>{});
+    process.stdin.once('data',()=>console.log(JSON.stringify({id:'call-1',result:'ready'})));
+    setInterval(()=>{},1000);`);
+  runner.dispatch({...job, settings: {...job.settings, cwd:'/'}, sandbox:{read:[],write:[],network:false}});
+  assert.equal((await ready)[0].result, 'ready');
+  const start = performance.now();
+  runner.stop(job.id);
+  const [ended] = await exit;
+  assert.ok(performance.now() - start >= 9900);
+  assert.equal(ended.stopFailed, undefined);
+  assert.match(ended.issue, /executor exited/i);
+});
+
 test('runner closes a missing executable and a rejected sandbox without a fallback', {timeout: 10000}, async t => {
   const runner = new ProcessRunner();
   t.after(() => runner.close());

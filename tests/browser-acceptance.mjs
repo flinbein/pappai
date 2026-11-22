@@ -82,12 +82,23 @@ const origin = "http://localhost:"+port;
 let browser;
 let imageBuilt = false;
 let containerCreated = false;
+const volumes = [];
+function volume(suffix) {
+  const name = docker("volume","create",runId+"-"+suffix);
+  volumes.push(name);
+  return name;
+}
+function startInstallation(platform, workspace) {
+  docker("run","-d","--name",runId,"--cap-add","SYS_ADMIN","--security-opt","seccomp=unconfined",
+    "-v",platform+":/var/lib/pappai","-v",workspace+":/workspace",
+    "-e","HOST=0.0.0.0","-e","PAPPAI_ORIGIN="+origin,"-p",`127.0.0.1:${port}:8080`,runId);
+  containerCreated = true;
+}
 try {
   docker("build","-t",runId,".");
   imageBuilt = true;
-  docker("run","-d","--name",runId,"--cap-add","SYS_ADMIN","--security-opt","seccomp=unconfined",
-    "-e","HOST=0.0.0.0","-e","PAPPAI_ORIGIN="+origin,"-p",`127.0.0.1:${port}:8080`,runId);
-  containerCreated = true;
+  const platform = volume("platform"), workspace = volume("workspace");
+  startInstallation(platform,workspace);
   await waitForService(origin);
   const executablePath = [process.env.PAPPAI_CHROME_BIN,
     "C:/Program Files/Google/Chrome/Application/chrome.exe",
@@ -116,6 +127,44 @@ try {
   const limited = await panel(browser,origin);
   await register(limited,userEmail,docker("exec",runId,"node","src/admin.ts","otp",userEmail));
   await rpc(limited,"call",{node:app,method:"message.extractText",data:{text:"  Привет  "}},/Permission denied/);
+  await rpc(limited,"call",{node:app,method:"$.app.manifest.get"},/Permission denied/);
+  await admin.getByRole('button',{name:'Extract',exact:true}).click({timeout:3000});
+  const management = admin.locator('#app-management');
+  const editor = management.getByLabel('Манифест JSON');
+  const delayed = structuredClone(manifest);
+  delayed.run.settings.args = ['-e', `process.stdin.once('data',bytes=>{
+    const {id}=JSON.parse(bytes);
+    process.on('SIGINT',()=>process.stdout.write(JSON.stringify({id,result:'finished'})+'\\n',()=>process.exit(0)));
+    require('fs').writeFileSync('/tmp/stop-ready','1');
+  });`];
+  async function save(value) {
+    await editor.fill(JSON.stringify(value,null,2));
+    await management.getByRole('button',{name:'Сохранить манифест'}).click();
+    await management.getByText('Манифест сохранён',{exact:true}).waitFor();
+  }
+  await save(delayed);
+  const backgroundCall = async () => (await admin.request.post(origin+'/rpc',{headers:{Origin:origin},
+    data:{jsonrpc:'2.0', id:randomUUID(), method:'call', params:{node:app,method:'message.extractText',data:{text:'wait'}}}})).json();
+  const inProgress = backgroundCall();
+  await exists('/var/lib/pappai/tmp/'+app+'/stop-ready');
+  const waiting = backgroundCall();
+  for (let i=0; i<20; i++) {
+    await management.getByRole('button',{name:'Обновить состояние'}).click();
+    if (await management.locator('#app-queued').textContent()==='1') break;
+    await sleep(100);
+  }
+  assert.equal(await management.locator('#app-queued').textContent(),'1');
+  await management.getByRole('button',{name:'Остановить',exact:true}).click();
+  assert.match((await waiting).error.message,/stop/i);
+  assert.equal((await inProgress).result,'finished');
+  await management.getByRole('button',{name:'Обновить состояние'}).click();
+  await management.getByText('Остановлена',{exact:true}).waitFor();
+  const updated = structuredClone(manifest);
+  updated.run.settings.features['message.extractText'].version='2';
+  await save(updated);
+  await management.getByRole('button',{name:'Запустить',exact:true}).click();
+  await management.getByText('Работает',{exact:true}).waitFor();
+  assert.equal(await rpc(admin,'call',{node:app,method:'message.extractText',version:'2',data:{text:' v2 '}}),'v2');
   const direct = await terminal(admin, false);
   const jailed = await terminal(limited, true);
   const optional = await terminal(admin, true, 'Открыть в песочнице');
@@ -147,15 +196,27 @@ try {
   await exists('/tmp/direct-job');
   await sleep(350);
   assert.equal(docker('exec', runId, 'sh', '-c', 'test ! -e "$1" && echo clean', 'sh', tmp + '/leak'), 'clean');
-  docker("restart","-t","3",runId);
+  docker("exec",runId,"sh","-c",'echo "$1" > /workspace/restore-check',"sh",app);
+  docker("stop",runId);
+  const archive = volume("backup");
+  docker("run","--rm","--network","none","-v",platform+":/platform:ro","-v",workspace+":/workspace:ro",
+    "-v",archive+":/backup",runId,"tar","czf","/backup/data.tgz","-C","/","platform","workspace");
+  docker("rm",runId);
+  containerCreated = false;
+  const recoveredPlatform = volume("restored-platform"), recoveredWorkspace = volume("restored-workspace");
+  docker("run","--rm","--network","none","-v",recoveredPlatform+":/platform","-v",recoveredWorkspace+":/workspace",
+    "-v",archive+":/backup:ro",runId,"tar","xzf","/backup/data.tgz","-C","/");
+  startInstallation(recoveredPlatform,recoveredWorkspace);
   await waitForService(origin);
+  assert.equal(docker("exec",runId,"cat","/workspace/restore-check"),app);
   await admin.reload();
   const tree = await rpc(admin,"dir",{});
   assert.deepEqual([team,user,app].map(id=>tree.some(n=>n.id===id)),[true,true,true]);
-  assert.equal(await call(app,"message.extractText",{text:"  После рестарта  "}),"После рестарта");
-  console.log("PASS: browser passkey, TEAM/USER/APP, sandboxed process, denied USER and SQLite restart");
+  assert.equal(await rpc(admin,"call",{node:app,method:"message.extractText",version:"2",data:{text:"  После восстановления  "}}),"После восстановления");
+  console.log("PASS: browser passkey, APP calls, USER isolation and independent two-volume restore");
 } finally {
   await browser?.close();
   if (containerCreated) docker("rm","-f","-v",runId);
+  for (const name of volumes) docker("volume","rm",name);
   if (imageBuilt) docker("image","rm",runId);
 }

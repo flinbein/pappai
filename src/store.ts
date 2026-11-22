@@ -132,12 +132,22 @@ export class Store {
     return decode(row as SqlNode);
   }
 
-  setStatus(id: string, status: NodeStatus, issue: string | null = null): NodeRecord {
+  setStatus(id: string, status: NodeStatus, issue?: string): NodeRecord {
     const row = this.db.prepare(`
-      UPDATE nodes SET status=?,lastIssue=? WHERE id=? AND type IN ('user','app') RETURNING *
-    `).get(status, issue, id);
+      UPDATE nodes SET status=?,lastIssue=COALESCE(?, lastIssue) WHERE id=? AND type IN ('user','app') RETURNING *
+    `).get(status, issue ?? null, id);
     if (!row) throw new Error('No such APP or USER');
     return decode(row as SqlNode);
+  }
+
+  setManifest(id: string, manifest: unknown) {
+    const result = this.db.prepare("UPDATE nodes SET manifest=? WHERE id=? AND type='app'").run(JSON.stringify(manifest), id);
+    if (!result.changes) throw Error('Unknown APP');
+  }
+
+  recoverInterruptedStops() {
+    this.db.prepare("UPDATE nodes SET status='error', lastIssue=? WHERE type='app' AND status='stopping'")
+      .run('Controller restarted before executor exit was confirmed');
   }
 
   workingApps(): NodeRecord[] {

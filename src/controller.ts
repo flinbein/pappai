@@ -10,11 +10,22 @@ type Pending = {
   appId: string;
   from: string;
   method: string;
+  version?: string;
   data: any;
   resolve: (v: any) => void;
   reject: (e: Error) => void;
   timer: NodeJS.Timeout;
 };
+type Config = ReturnType<typeof prepare>;
+const appMethods = ['$.app.start', '$.app.stop', '$.app.get', '$.app.executors.get',
+  '$.app.manifest.get', '$.app.manifest.getApplied', '$.app.manifest.set'];
+
+function inputIssue(config: Config, method: string, version: unknown, data: unknown) {
+  const feature = config.features.get(method);
+  if (feature?.type !== 'method') return 'Method not found';
+  if (version !== undefined && version !== feature.version) return 'Method version mismatch';
+  if (feature.input && !feature.input(data)) return 'Input does not match schema';
+}
 export class Controller {
   store: Store;
   runner: ProcessRunner;
@@ -22,6 +33,7 @@ export class Controller {
   private pending = new Map<string, Pending>();
   private queues = new Map<string, string[]>();
   private active = new Map<string, string>();
+  private runnerIssue?: string;
 
   constructor(store: Store, runner: ProcessRunner) {
     this.store = store;
@@ -44,14 +56,21 @@ export class Controller {
       }
       this.finish(id, undefined, result);
     });
-    runner.on('exit', ({ id, appId, issue, startFailed }) => {
+    runner.on('exit', ({ id, appId, issue, startFailed, stopFailed }) => {
       if (this.active.get(appId) !== id) return;
       this.active.delete(appId);
       this.finish(id, new Error(issue ?? 'Executor exited without a reply'));
-      if (startFailed) this.failApp(appId, issue ?? 'Executor launch failed');
-      else this.next(appId);
+      const app = this.store.get(appId);
+      if (stopFailed) this.failApp(appId, issue);
+      else if (app?.status === 'stopping') this.store.setStatus(appId, 'stopped');
+      else if (startFailed) this.failApp(appId, issue ?? 'Executor launch failed');
+      else if (app?.status === 'working') {
+        if (issue) this.store.setStatus(appId, 'working', issue);
+        this.next(appId);
+      }
     });
     runner.on('lost', (issue: string) => {
+      this.runnerIssue = issue;
       const ids = new Set([...this.active.keys(), ...this.queues.keys()]);
       for (const app of store.workingApps()) ids.add(app.id);
       this.active.clear();
@@ -79,7 +98,8 @@ export class Controller {
     else call.resolve(result);
   }
   private failApp(id: string, issue: string) {
-    if (this.store.get(id)?.status === 'working') this.store.setStatus(id, 'error', issue);
+    const status = this.store.get(id)?.status;
+    if (status === 'working' || status === 'stopping') this.store.setStatus(id, 'error', issue);
     for (const call of this.pending.values())
       if (call.appId === id) this.finish(call.id, new Error(issue));
   }
@@ -116,10 +136,8 @@ export class Controller {
     if (!app) throw Error('Node not found');
     if (method.startsWith('$.')) return this.system(actor, app, method, data ?? {});
     if (app.type !== 'app' || app.status !== 'working') throw Error('APP is not working');
-    const feature = this.config(appId).features.get(method);
-    if (feature?.type !== 'method') throw Error('Method not found');
-    if (version !== undefined && version !== feature.version) throw Error('Method version mismatch');
-    if (feature.input && !feature.input(data)) throw Error('Input does not match schema');
+    const issue = inputIssue(this.config(appId), method, version, data);
+    if (issue) throw Error(issue);
     if (Buffer.byteLength(JSON.stringify({ method, data })) > 10 * 1024) throw Error('Input too large');
     const timeout = params.timeoutMs ?? DAY;
     if (!Number.isInteger(timeout) || timeout < 1 || timeout > DAY) throw Error('Invalid timeout');
@@ -131,7 +149,7 @@ export class Controller {
     try {
       return await new Promise((resolve, reject) => {
         const timer = setTimeout(() => this.finish(id, new Error('Call timed out')), timeout);
-        this.pending.set(id, { id, appId, from: actor, method, data, timer, resolve, reject });
+        this.pending.set(id, { id, appId, from: actor, method, version, data, timer, resolve, reject });
         signal?.addEventListener('abort', abort, { once: true });
         queue.push(id);
         this.queues.set(appId, queue);
@@ -158,9 +176,52 @@ export class Controller {
       return { id: created.id };
     }
     if (method === '$.app.start' && ['app', 'user'].includes(node.type)) {
-      if (node.type === 'app') this.config(node.id);
+      if (node.status === 'stopping') throw Error('APP is stopping');
+      if (node.type === 'app') {
+        if (this.runnerIssue) throw Error(this.runnerIssue);
+        this.config(node.id);
+      }
       this.store.setStatus(node.id, 'working');
       return {};
+    }
+    if (node.type === 'app') {
+      const active = this.active.get(node.id);
+      switch (method) {
+        case '$.app.get':
+          return {status: node.status, lastIssue: node.lastIssue, manifestChanged: false};
+        case '$.app.executors.get':
+          return {mode: 'oneShot', active: active ? 1 : 0, limit: 1,
+            queued: this.queues.get(node.id)?.length ?? 0, restarting: false};
+        case '$.app.stop':
+          if (node.status === 'stopped' || node.status === 'stopping') return {};
+          this.store.setStatus(node.id, active ? 'stopping' : 'stopped');
+          for (const id of [...(this.queues.get(node.id) ?? [])]) this.finish(id, Error('APP stopped'));
+          if (active) {
+            try { this.runner.stop(active); }
+            catch (error) { this.failApp(node.id, (error as Error).message); }
+          }
+          return {};
+        case '$.app.manifest.get': return {manifest: node.manifest};
+        case '$.app.manifest.getApplied': return node.manifest;
+        case '$.app.manifest.set': {
+          if (!data.source || Object.keys(data.source).length !== 1 || !Object.hasOwn(data.source,'manifest'))
+            throw Error('Expected an inline manifest source');
+          const config = prepare(data.source.manifest);
+          const rejected = new Map<string, string>();
+          for (const id of this.queues.get(node.id) ?? []) {
+            const call = this.pending.get(id)!;
+            const issue = inputIssue(config, call.method, call.version, call.data);
+            if (issue) rejected.set(id, issue);
+          }
+          const assigned = active && this.pending.get(active);
+          if (assigned && config.features.get(assigned.method)?.type !== 'method')
+            rejected.set(assigned.id, 'Method not found');
+          this.store.setManifest(node.id, data.source.manifest);
+          this.configs.set(node.id, config);
+          for (const [id, issue] of rejected) this.finish(id, Error(issue));
+          return {};
+        }
+      }
     }
     throw Error('Unknown system method');
   }
@@ -171,7 +232,7 @@ export class Controller {
     const core =
       app.type === 'workspace' || app.type === 'team'
         ? ['$.team.create', '$.user.create', '$.app.create']
-        : ['$.app.start'];
+        : app.type === 'app' ? appMethods : ['$.app.start'];
     for (const name of core)
       entries.set(name, {
         type: 'method',
