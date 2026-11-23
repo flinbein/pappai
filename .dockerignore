@@ -5,9 +5,7 @@
 !package-lock.json
 !src/*.ts
 !src/*.py
-!public/*.html
-!public/*.css
-!public/*.js
+!scripts/install-web.mjs
 !examples/extract-text/manifest.json
 !examples/extract-text/extract.cjs
 !examples/webhook/*

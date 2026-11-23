@@ -4,6 +4,7 @@ The controller owns the node tree, permissions, queues and call state. A runner 
 
 - [First end-to-end build](first-milestone.md) lists the steps and expected results.
 - [Web terminal internals](web-terminal.md) describes WebSocket authentication, the PTY and process cleanup.
+- [Serving and updating the web interface](web-interface.md) covers the bundled release, live upgrades and rollback.
 - [Restoring both volumes](restore.md) covers backups, restoration and verification.
 - [Roadmap](roadmap.md) lists the stages after the first build and links to acceptance criteria.
 - [Controller design](architecture-review.md) explains call ownership, configuration changes and trust in package publishers.

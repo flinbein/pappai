@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage } from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync, readFileSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { Store } from './store.ts';
@@ -14,24 +14,7 @@ import { attachEvents } from './events.ts';
 import { Controller } from './controller.ts';
 import { createAuth } from './auth.ts';
 import { attachTerminals } from './terminal.ts';
-
-const assets = new Map(
-  Object.entries({
-    '/': ['index.html', 'text/html'],
-    '/app.js': ['app.js', 'text/javascript'],
-    '/auth.js': ['auth.js', 'text/javascript'],
-    '/style.css': ['style.css', 'text/css'],
-    '/terminal': ['terminal.html', 'text/html'],
-    '/terminal.js': ['terminal.js', 'text/javascript'],
-    '/terminal-controls.js': ['terminal-controls.js', 'text/javascript'],
-    '/xterm.mjs': ['../node_modules/@xterm/xterm/lib/xterm.mjs', 'text/javascript'],
-    '/xterm.css': ['../node_modules/@xterm/xterm/css/xterm.css', 'text/css'],
-    '/fit.mjs': ['../node_modules/@xterm/addon-fit/lib/addon-fit.mjs', 'text/javascript'],
-  }).map(([path, [name, type]]) => [
-    path,
-    { type, content: readFileSync(new URL('../public/' + name, import.meta.url)) },
-  ]),
-);
+import { serveWeb } from './web-static.ts';
 
 async function body(req: IncomingMessage) {
   const buffers: Buffer[] = [];
@@ -43,7 +26,9 @@ async function body(req: IncomingMessage) {
   }
   return JSON.parse(Buffer.concat(buffers).toString('utf8'));
 }
-export function createService({ db, origin }: { db: DatabaseSync; origin: string }) {
+export function createService({ db, origin, webRoot = process.env.PAPPAI_WEB_ROOT }: {
+  db: DatabaseSync; origin: string; webRoot?: string;
+}) {
   const address = new URL(origin);
   const store = new Store(db);
   store.recoverInterruptedStops();
@@ -140,11 +125,7 @@ export function createService({ db, origin }: { db: DatabaseSync; origin: string
         if (!auth.user(req, false)) { res.writeHead(303, {Location: '/'}).end(); return; }
         res.setHeader('Content-Security-Policy', "default-src 'self'; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'");
       }
-      if (req.method === 'GET' && assets.has(path)) {
-        const { type, content } = assets.get(path)!;
-        res.writeHead(200, { 'Content-Type': type + '; charset=utf-8' }).end(content);
-        return;
-      }
+      if (req.method === 'GET' && await serveWeb(path, res, webRoot)) return;
       res.setHeader('Content-Type', 'application/json; charset=utf-8');
       if (path === '/session' && req.method === 'GET') {
         const actor = auth.user(req, false);

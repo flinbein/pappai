@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { createServer } from "node:net";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { chromium } from "playwright-core";
@@ -12,8 +15,26 @@ import { exerciseCodexPanel } from "./browser-codex.mjs";
 const root = fileURLToPath(new URL("../", import.meta.url));
 const manifest = JSON.parse(readFileSync(new URL("../examples/extract-text/manifest.json", import.meta.url)));
 const runId = "pappai-browser-" + randomUUID();
+const require = createRequire(import.meta.url);
+const webPackage = require.resolve('@flinbein/pappai-web/package.json');
+const bundledVersion = require(webPackage).version;
+const webRoot = mkdtempSync(join(tmpdir(), 'pappai-browser-web-'));
 function docker(...args) {
   return execFileSync("docker", args, {cwd:root,encoding:"utf8",maxBuffer:16*1024*1024}).trim();
+}
+
+function activateWebRelease(version) {
+  const release = join(webRoot, 'releases', version);
+  mkdirSync(dirname(release), {recursive:true});
+  cpSync(join(dirname(webPackage), 'dist'), release, {recursive:true});
+  for (const file of readdirSync(release, {recursive:true, withFileTypes:true})) {
+    if (!file.isFile() || !/\.(html|js|css)$/.test(file.name)) continue;
+    const path = join(file.parentPath, file.name);
+    const text = readFileSync(path, 'utf8');
+    writeFileSync(path, text.replaceAll('/_web/'+bundledVersion+'/', '/_web/'+version+'/'));
+  }
+  writeFileSync(join(webRoot, 'next'), version+'\n');
+  renameSync(join(webRoot, 'next'), join(webRoot, 'current'));
 }
 
 async function freePort() {
@@ -57,7 +78,9 @@ async function terminal(panel, sandbox, link = 'Открыть терминал'
   const input = page.locator('.xterm-helper-textarea');
   await input.focus();
   async function command(line) {
-    await page.keyboard.insertText(line);
+    await page.bringToFront();
+    await input.focus();
+    await page.keyboard.type(line);
     await page.keyboard.press('Enter');
   }
   return {page, command};
@@ -96,6 +119,7 @@ function startInstallation(platform, workspace) {
   assert.equal(!!runnerModules, !!codexDist, "Set both Codex fixture paths");
   docker("run","-d","--name",runId,"--cap-add","SYS_ADMIN","--security-opt","seccomp=unconfined",
     ...(runnerModules ? ["-v",runnerModules+":/installed/node_modules:ro","-v",codexDist+":/code-dist:ro"] : []),
+    "-v",webRoot+":/web-releases:ro","-e","PAPPAI_WEB_ROOT=/web-releases",
     "-v",platform+":/var/lib/pappai","-v",workspace+":/workspace",
     "-e","HOST=0.0.0.0","-e","PAPPAI_ORIGIN="+origin,"-p",`127.0.0.1:${port}:8080`,runId);
   containerCreated = true;
@@ -182,6 +206,31 @@ try {
   await management.getByText('Работает',{exact:true}).waitFor();
   assert.equal(await rpc(admin,'call',{node:app,method:'message.extractText',version:'2',data:{text:' v2 '}}),'v2');
   const direct = await terminal(admin, false);
+  const originalScript = await direct.page.locator('script[type=module][src]').first().getAttribute('src');
+  assert.ok(originalScript.startsWith('/_web/'+bundledVersion+'/'));
+  await direct.page.waitForFunction(() => document.querySelector('.xterm-rows')?.textContent.includes('#'));
+  await direct.command('echo $$ > /tmp/web-shell-before');
+  try {
+    await exists('/tmp/web-shell-before');
+  } catch (error) {
+    throw new Error('Terminal output: ' + await direct.page.locator('.xterm-rows').textContent(), {cause:error});
+  }
+  const originalShell = docker('exec', runId, 'cat', '/tmp/web-shell-before');
+  assert.match(originalShell, /^[1-9]\d*$/);
+  const nextVersion = '0.0.0-browser-acceptance';
+  activateWebRelease(nextVersion);
+  const fresh = await admin.context().newPage();
+  await fresh.goto(origin);
+  await fresh.locator('#workspace').waitFor({state:'visible'});
+  const freshScript = await fresh.locator('script[type=module][src]').first().getAttribute('src');
+  assert.ok(freshScript.startsWith('/_web/'+nextVersion+'/'));
+  assert.equal((await fresh.request.get(origin+originalScript)).status(), 200);
+  const nextTree = await rpc(fresh, 'discover', {});
+  assert.ok(nextTree.some(node => node.id === app));
+  await fresh.close();
+  await direct.command('echo $$ > /tmp/web-release-session');
+  await exists('/tmp/web-release-session');
+  assert.equal(docker('exec', runId, 'cat', '/tmp/web-release-session'), originalShell);
   const jailed = await terminal(limited, true);
   const optional = await terminal(admin, true, 'Открыть в песочнице');
   await optional.page.close();
@@ -296,4 +345,5 @@ try {
   if (containerCreated) docker("rm","-f","-v",runId);
   for (const name of volumes) docker("volume","rm",name);
   if (imageBuilt) docker("image","rm",runId);
+  rmSync(webRoot, {recursive:true, force:true});
 }
