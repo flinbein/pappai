@@ -179,7 +179,7 @@ export function createService({ db, origin }: { db: DatabaseSync; origin: string
       });
       let result;
       switch (request.method) {
-        case 'dir':
+        case 'discover':
           result = store.visible(actor);
           break;
         case 'help':

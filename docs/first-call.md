@@ -37,8 +37,8 @@ Replace `APP_ID` with the returned `id` and submit these requests through the sa
 | Operation | JSON parameters | Result |
 |---|---|---|
 | `call` | `{"node":"APP_ID","method":"$.app.start"}` | The APP enters `working`. |
-| `dir` | `{}` | Visible APPs include their status. |
-| `help` | `{"node":"APP_ID","features":"message.**","schemas":"message.**"}` | Method description, version and schema. |
+| `discover` | `{}` | Visible APPs include their status. |
+| `help` | `{"node":"APP_ID","features":"message.**","schema":true}` | Method description, version and schema. |
 | `call` | `{"node":"APP_ID","method":"message.extractText","version":"1","data":{"text":"  Hello  "}}` | The string `"Hello"`. |
 
 To create a TEAM or USER, call `$.team.create` or `$.user.create` on the parent. For a USER supply `name`, `email` and `permissions`. Start it with `$.app.start` and issue a code with the `otp` command. For example, `[{"discover":true}]` allows discovery but denies `message.extractText`. Try signing in as that USER in a separate browser profile.

@@ -26,7 +26,7 @@ The process sends its own requests on stdout. The reply returns to the same work
 {"id":"request-1","result":"Hello"}
 ```
 
-`dir` and `help` use the same APP permissions as outgoing calls. To publish, the process names an event from its current contract.
+`discover` and `help` use the same APP permissions as outgoing calls. To publish, the process names an event from its current contract.
 
 ```jsonl
 {"id":"request-2","method":"publish","params":{"event":"mail.received","data":{"text":"Hello"}}}

@@ -50,6 +50,9 @@ async function fixture(t) {
 test('USER subscriptions belong to a single WebSocket and expire with the authenticated session',async t=>{
   const {actor,connect,logout,address}=await fixture(t);
   const a=await connect(), b=await connect();
+  assert.ok((await a.rpc('discover')).result.some(node => node.id === actor));
+  const help = await a.rpc('help',{node:'~',features:'$.workspace',description:false});
+  assert.deepEqual(help.result['$.workspace'],{type:'document',version:'1',provides:{events:1}});
   const rejected=new WebSocket('ws://'+address.host+'/ws/events',{origin:'https://other.example',headers:{cookie:'session=test'}});
   assert.match((await once(rejected,'error'))[0].message,/403/);
   const add={subscriptions:[{id:'ui',node:actor,events:'chat.message'}]};

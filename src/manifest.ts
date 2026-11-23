@@ -28,7 +28,8 @@ const sharedSettings = {
       required: ['description', 'version'],
       additionalProperties: false,
       properties: {
-        type: { enum: ['doc', 'method', 'event'] },
+        // Older saved manifests may explicitly spell a document "doc".
+        type: { enum: ['document', 'doc', 'method', 'event'] },
         priority: { type: 'integer' },
         canEvict: { type: 'boolean' },
         description: { type: 'string', maxLength: 255 },
@@ -124,7 +125,7 @@ export function prepare(source: any) {
       throw Error('Only methods may declare queue priority');
     features.set(name, {
       ...entry,
-      type: entry.type ?? 'doc',
+      type: entry.type === 'doc' ? 'document' : entry.type ?? 'document',
       input: compileSchema(entry.schema?.input),
       output: compileSchema(entry.schema?.output),
       data: compileSchema(entry.schema?.data),

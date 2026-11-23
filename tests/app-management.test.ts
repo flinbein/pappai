@@ -60,7 +60,7 @@ test('manifest replacement validates before saving and reconciles the active con
   assert.deepEqual(await call('$.app.manifest.get'),{manifest});
   await call('$.app.manifest.set',{source:{manifest:next}});
   assert.deepEqual(store.get(app.id).manifest,next);
-  assert.equal(controller.help(admin.id,{node:app.id}).versions[method],'2');
+  assert.equal(controller.help(admin.id,{node:app.id})[method].version,'2');
   runner.emit('reply',{...runner.jobs[0],result:'old format'});
   runner.emit('reply',{...runner.jobs[0],result:1});
   runner.emit('exit',runner.jobs[0]);

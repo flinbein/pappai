@@ -128,11 +128,11 @@ try {
   const {id:app} = await call(team,"$.app.create",{
     name:"Extract",permissions:[{read:"/opt/pappai/examples/extract-text"}],source:{manifest},
   });
-  assert.equal((await rpc(admin,"dir",{})).find(n=>n.id===app).status,"stopped");
+  assert.equal((await rpc(admin,"discover",{})).find(n=>n.id===app).status,"stopped");
   await call(user,"$.app.start",{});
   await call(app,"$.app.start",{});
   const info = await rpc(admin,"help",{node:app,features:"message.extractText"});
-  assert.equal(info.versions["message.extractText"],"1");
+  assert.equal(info["message.extractText"].version,"1");
   assert.equal(await call(app,"message.extractText",{text:"  Привет  "}),"Привет");
   const limited = await panel(browser,origin);
   await register(limited,userEmail,docker("exec",runId,"node","src/admin.ts","otp",userEmail));
@@ -226,7 +226,7 @@ try {
   await waitForService(origin);
   assert.equal(docker("exec",runId,"cat","/workspace/restore-check"),app);
   await admin.reload();
-  const tree = await rpc(admin,"dir",{});
+  const tree = await rpc(admin,"discover",{});
   assert.deepEqual([team,user,app].map(id=>tree.some(n=>n.id===id)),[true,true,true]);
   assert.equal(await rpc(admin,"call",{node:app,method:"message.extractText",version:"2",data:{text:"  После восстановления  "}}),"После восстановления");
   console.log("PASS: browser passkey, APP calls, USER isolation and independent two-volume restore");

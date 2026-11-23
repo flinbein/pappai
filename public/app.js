@@ -99,7 +99,7 @@ function renderTree() {
 
 async function refresh(preferred) {
   const revision = ++listing;
-  const nodes = await rpc('dir', {});
+  const nodes = await rpc('discover', {});
   if (revision !== listing) return;
   directory = nodes;
   const node = nodes.find(n => n.id === (preferred ?? selected?.node.id)) ?? nodes[0];
@@ -154,7 +154,7 @@ async function selectNode(node) {
   function guarded(promise) {
     return promise.catch(error => { if (selected === view) el('node-error').textContent = error.message; });
   }
-  const tasks = [guarded(rpc('help', {node:node.id, features:'**', docs:'**', schemas:'**'}).then(async catalog => {
+  const tasks = [guarded(rpc('help', {node:node.id, features:true, doc:true, schema:true}).then(async catalog => {
     if (selected !== view) return;
     displayCatalog(view, catalog);
     el('new-node').hidden = !['workspace','team'].includes(node.type) || !(canCreate('profile') || canCreate('app') || (admin && canCreate('team')));
@@ -178,14 +178,14 @@ async function selectNode(node) {
   }
   await Promise.all(tasks);
 }
-function isMethod(name) { return selected?.catalog.features?.[name]?.startsWith('METHOD;'); }
+function isMethod(name) { return selected?.catalog[name]?.type === 'method'; }
 function canCreate(type) { return isMethod('$.' + type + '.create'); }
 function displayCatalog(view, catalog) {
   view.catalog = catalog;
   const groups = new Map();
-  for (const [name, info] of Object.entries(catalog.features ?? {}).sort(([a],[b]) => a.localeCompare(b))) {
-    const kind = info.split(';',1)[0];
-    const label = kind === 'METHOD' ? (name.startsWith('$.') ? 'Системные методы' : 'Прикладные методы') : kind === 'EVENT' ? 'События' : 'Статьи';
+  for (const [name, info] of Object.entries(catalog).sort(([a],[b]) => a.localeCompare(b))) {
+    const kind = info.type;
+    const label = kind === 'method' ? (name.startsWith('$.') ? 'Системные методы' : 'Прикладные методы') : kind === 'event' ? 'События' : 'Статьи';
     if (!groups.has(label)) {
       const group = document.createElement('optgroup'); group.label = label; groups.set(label, group);
     }
@@ -196,13 +196,12 @@ function displayCatalog(view, catalog) {
 }
 function displayFeature() {
   const name = el('feature').value;
-  const {features, versions, docs, schemas} = selected.catalog;
   selected.feature = name;
-  const info = features?.[name];
-  el('feature-description').textContent = info ? 'v' + versions[name] + ' · ' + info.slice(info.indexOf(';') + 1) : 'Нет доступной справки.';
-  el('feature-doc').textContent = docs?.[name] ?? '';
-  el('schema-block').hidden = schemas?.[name] === undefined;
-  el('feature-schema').textContent = json(schemas?.[name]) ?? '';
+  const info = selected.catalog[name];
+  el('feature-description').textContent = info ? 'v' + info.version + ' · ' + info.description : 'Нет доступной справки.';
+  el('feature-doc').textContent = info?.doc ?? '';
+  el('schema-block').hidden = info?.schema === undefined;
+  el('feature-schema').textContent = json(info?.schema) ?? '';
   el('method-call').hidden = !isMethod(name);
   el('arguments').value = name === 'agent.execute' ? '{ "input": "" }' : '{}';
   el('method-result').textContent = '';
@@ -213,7 +212,7 @@ action('method-call','submit', async () => {
   const data = parse('arguments');
   el('method-result').textContent = 'Выполняется…';
   try {
-    const result = await call(view.node.id, name, data, view.catalog.versions[name]);
+    const result = await call(view.node.id, name, data, view.catalog[name].version);
     if (selected === view && view.feature === name) el('method-result').textContent = json(result);
     if (name.startsWith('$.') && selected === view) await refresh();
   } catch (error) {
@@ -253,7 +252,7 @@ action('app-save','click', async () => {
   const view = selected, draft = el('app-manifest').value, parsed = parse('app-manifest');
   const source = parsed && Object.hasOwn(parsed,'run') ? {manifest:parsed} : parsed;
   await call(view.node.id,'$.app.manifest.set',{source});
-  const [saved, catalog] = await Promise.all([call(view.node.id,'$.app.manifest.get'),rpc('help',{node:view.node.id,features:'**',docs:'**',schemas:'**'})]);
+  const [saved, catalog] = await Promise.all([call(view.node.id,'$.app.manifest.get'),rpc('help',{node:view.node.id,features:true,doc:true,schema:true})]);
   if (view !== selected) return;
   displayCatalog(view,catalog);
   el('chat').hidden = !isMethod('agent.execute');
@@ -274,7 +273,7 @@ action('send-message','submit',async () => {
   if (!input.trim() || conversations.get(node)?.pending) return;
   const entry = {pending:true, text:'Ожидаем ответ агента…'}; conversations.set(node,entry); renderReply();
   try {
-    const result = await call(node,'agent.execute',{input},view.catalog.versions['agent.execute']);
+    const result = await call(node,'agent.execute',{input},view.catalog['agent.execute'].version);
     entry.text = typeof result === 'string' ? result : json(result);
     if (selected === view && el('message').value === input) el('message').value = '';
   } catch (error) { entry.text = error.message; }

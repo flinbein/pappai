@@ -40,7 +40,7 @@ export function validNodes(value: NodeSelector | NodeSelector[]): boolean {
   });
 }
 
-function validNames(value: NameSelector): boolean {
+export function validNames(value: NameSelector): boolean {
   return typeof value === 'boolean' || list(value).every(name => typeof name === 'string' &&
     name.split('.').every((part, i, parts) => /^[\w$-]+$/.test(part) || part === '*' ||
       (part === '**' && i === parts.length - 1)));

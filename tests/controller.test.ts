@@ -54,9 +54,34 @@ test('help describes core operations and preserves the manifest author’s docum
   node.manifest = structuredClone(manifest);
   node.manifest.run.settings.features[method].description = 'Trim a message.';
   const result = controller.help('owner', {node: 'app', features: ['$.app.restart', method]});
-  assert.equal(result.features['$.app.restart'], 'METHOD;Restart execution and preserve queued work.');
-  assert.equal(result.features[method], 'METHOD;Trim a message.');
+  assert.equal(result['$.app.restart'].description, 'Restart execution and preserve queued work.');
+  assert.equal(result[method].description, 'Trim a message.');
 });
+test('help counts registered descendants of any type independently of the selection', () => {
+  const {controller, node} = fixture();
+  node.manifest = structuredClone(manifest);
+  Object.assign(node.manifest.run.settings.features, {
+    'chat.send': {type:'method', version:'2', description:'Send.', schema:{input:{}, output:false}},
+    'chat.send.example.dice': {type:'document', version:'1', description:'Dice', doc:''},
+    'chat.send.done': {type:'event', version:'1', description:'Sent', schema:{data:true}},
+    'chat.send.done.details': {version:'1', description:'Details'},
+    'chat.sender': {version:'1', description:'Sender'},
+  });
+  const help = (params = {}) => controller.help('owner', {node:'app', ...params});
+  assert.deepEqual(help()['chat.send'], {type:'method', version:'2', description:'Send.', provides:{events:1,documents:2}});
+  assert.equal(help()['chat.send.done'], undefined);
+  assert.equal(help()['chat.sender'].type, 'document');
+  assert.deepEqual(Object.keys(help({features:'chat.send.*'})), ['chat.send.done']);
+  const selected = help({features:['chat.send','chat.send.**'], description:false, schema:true, doc:true});
+  assert.deepEqual(selected['chat.send'].schema, {input:{},output:false});
+  assert.deepEqual(selected['chat.send.done'], {type:'event',version:'1',schema:{data:true},provides:{documents:1}});
+  assert.deepEqual(selected['chat.send.example.dice'], {type:'document',version:'1',doc:''});
+  assert.ok(help({features:true})['chat.send.done.details']);
+  assert.deepEqual(Object.keys(help({features:[]})), []);
+  for (const params of [{schema:'**'}, {features:false}, {features:['**.bad']}, {docs:true}])
+    assert.throws(() => help(params), /help/);
+});
+
 test('forbidden, invalid version and invalid input are rejected before dispatch', async () => {
   const { controller, runner } = fixture();
   await assert.rejects(controller.call('other', { node: 'app', method }), /permission/i);

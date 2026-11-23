@@ -40,9 +40,15 @@ test('installed Codex package imports an authorized profile and handles typed wo
     const msg={type:'message',id:'msg_'+turns.length,role:'assistant',status:'completed',content:[{type:'output_text',text,annotations:[]}]};
     const id='resp_'+turns.length;
     const toolTurn = turns.length === 4 && turns[3].includes('CHECK-WORKSPACE-TOOLS');
-    const items = toolTurn ? ['$.app.get','$.app.executors.get'].map((method,index)=>({
-      type:'function_call',name:'pappai_call',call_id:'workspace_'+index,id:'fc_'+index,status:'completed',
-      arguments:JSON.stringify({node:toolTarget,method,data:{}}),
+    const tools = [
+      {name:'pappai_call',args:{node:toolTarget,method:'$.app.get',data:{}}},
+      {name:'pappai_call',args:{node:toolTarget,method:'$.app.executors.get',data:{}}},
+      {name:'pappai_discover',args:{}},
+      {name:'pappai_help',args:{node:toolTarget,features:'$.app',description:false}},
+    ];
+    const items = toolTurn ? tools.map(({name,args},index)=>({
+      type:'function_call',name,call_id:'workspace_'+index,id:'fc_'+index,status:'completed',
+      arguments:JSON.stringify(args),
     })) : [msg];
     if (toolTurn) offeredTools=request.tools.map((tool:{name:string})=>tool.name);
     for (const item of request.input) if (item.type==='function_call_output') workspaceResults.set(item.call_id,JSON.stringify(item.output));
@@ -96,13 +102,15 @@ test('installed Codex package imports an authorized profile and handles typed wo
     executors:{mode:'oneShot'},run:{type:'codex',settings:{model:'gpt-5.4',features:{
       execute:{type:'method',description:'Check visible workspace state',version:'1',schema:{output:{type:'integer'}}}}}}}}});
   toolTarget=(await createApp('inspectee',[])).id;
-  const {id:inspector}=await createApp('inspector',[{node:toolTarget,methods:'$.app.get'}]);
+  const {id:inspector}=await createApp('inspector',[{node:toolTarget,methods:'$.app.get',discover:true}]);
   await call(profile,'$.profile.scope.set',{scope:[inspector]});
   await call(inspector,'$.app.start');
   assert.equal(await call(inspector,'execute',{input:'CHECK-WORKSPACE-TOOLS'}),5);
-  assert.ok(['pappai_dir','pappai_help','pappai_call','pappai_publish'].every(name=>offeredTools.includes(name)));
+  assert.ok(['pappai_discover','pappai_help','pappai_call','pappai_publish'].every(name=>offeredTools.includes(name)));
   assert.match(workspaceResults.get('workspace_0') ?? '',/stopped/);
   assert.match(workspaceResults.get('workspace_1') ?? '',/Permission denied/);
+  assert.match(workspaceResults.get('workspace_2') ?? '',/inspectee/);
+  assert.match(workspaceResults.get('workspace_3') ?? '',/provides/);
   await call(profile,'$.profile.scope.set',{scope:[persistentApp]});
   await call(persistentApp,'$.app.start');
   const interrupted=assert.rejects(call(persistentApp,'agent.execute',{input:'HOLD-UNTIL-INTERRUPTED'}),/interrupted/);

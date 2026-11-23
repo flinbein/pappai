@@ -1,4 +1,14 @@
 // Keep descriptions with the platform. APP feature documentation comes from its manifest.
+export const systemGroups = {
+  '$.app': 'Application lifecycle, configuration and executors.',
+  '$.node': 'Node permissions, subscriptions and notifications.',
+  '$.profile': 'Authorization profiles and their scope.',
+  '$.runners': 'Installed workspace runners.',
+  '$.team': 'Teams and their members.',
+  '$.user': 'User accounts and account recovery.',
+  '$.workspace': 'Workspace lifecycle notifications.',
+};
+
 const descriptions: Record<string, string> = {
   '$.team.create': 'Create a team under this node.',
   '$.user.create': 'Create a user account under this node.',

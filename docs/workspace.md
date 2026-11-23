@@ -6,7 +6,19 @@ The workspace is the root of the tree. TEAM nodes group nodes and define access 
 - **Permissions and subscriptions.** Permissions determine which operations are available. Subscriptions select events within those permissions. A subscription to incoming messages does not grant the right to send a reply.
 - **Startup.** A new APP is stopped. After starting, `working` means it can accept work, even when no process has launched yet. A bot that needs to connect immediately can subscribe to its own transition to `working`.
 
-Use `dir` to list visible nodes and `help` to inspect methods and events. The controller checks permissions when a method is called. See the [process runner contract](dev/runners/process.md) and [APP events and subscriptions](app-exchange.md).
+Use `discover` to list visible nodes and `help` to inspect methods and events. The controller checks permissions when a method is called. See the [process runner contract](dev/runners/process.md) and [APP events and subscriptions](app-exchange.md).
+
+### Browse a node's contract
+
+`help({node})` returns an object keyed by feature name. It shows entries with no registered ancestor. Each entry has a `type` (method, event or document), a `version` and a short `description`. A feature with descendants also has `provides`, counting all descendant methods, events and documents in the node's catalog. Zero counts are omitted. Any feature may have children.
+
+Pass `features: true` for the complete catalog, an exact name for one entry, or an array to combine selections. The pattern `chat.send.*` selects one level below the method and `chat.send.**` selects every level below it. A more detailed query could be:
+
+```json
+{"node":"APP_ID","features":["chat.send","chat.send.**"],"schema":true,"doc":true}
+```
+
+Available schemas and detailed documentation appear inside each selected entry. Method schemas use `input` and `output`, and event schemas use `data`. Set `description: false` for a compact index. An empty selection or an undiscoverable node returns `{}`. The selector and projection flags work the same through HTTP, WebSocket and executor requests.
 
 ## File permissions
 

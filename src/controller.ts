@@ -2,9 +2,9 @@ import { randomUUID } from 'node:crypto';
 import type { EventEmitter } from 'node:events';
 import { prepare } from './manifest.ts';
 import { mask as maskSource } from './manifest-sources.ts';
-import { matchesName, validNodes, type Rule } from './permits.ts';
+import { matchesName, validNames, validNodes, type Rule } from './permits.ts';
 import { compileSubscriptions, changeSubscriptions } from './subscriptions.ts';
-import { systemDescription } from './system-help.ts';
+import { systemDescription, systemGroups } from './system-help.ts';
 import { DeliveryReports, type DeliveryNotice } from './delivery-reports.ts';
 import type { Store } from './store.ts';
 import type { ProcessRunner, Assignment, InputRecord } from './runner.ts';
@@ -472,7 +472,7 @@ export class Controller {
           },worker.abort.signal,worker);
           break;
         case 'help': result = this.help(appId,params); break;
-        case 'dir': result = this.store.visible(appId); break;
+        case 'discover': result = this.store.visible(appId); break;
         default:
           if (!this.hooks.executorRequest) throw Error('Unknown executor request');
           result = await this.hooks.executorRequest(workerId,appId,method,params);
@@ -659,6 +659,15 @@ export class Controller {
     throw Error('Unknown system method');
   }
   help(actor: string, params: any) {
+    if (!params || typeof params.node !== 'string' ||
+        Object.keys(params).some(key => !['node','features','description','doc','schema'].includes(key)))
+      throw Error('Invalid help parameters');
+    const {features, description = true, doc = false, schema = false} = params;
+    if (features !== undefined && !(features === true ||
+        ((typeof features === 'string' || Array.isArray(features)) && validNames(features))))
+      throw Error('Invalid help feature filter');
+    if (![description, doc, schema].every(value => typeof value === 'boolean'))
+      throw Error('Expected boolean help options');
     const app = this.store.get(params.node);
     if (!app || !this.store.canDiscover(actor, params.node)) return {};
     const entries = new Map(app.type === 'app' ? this.config(app.id).features : []);
@@ -674,30 +683,35 @@ export class Controller {
       });
     const events = app.type === 'app' ? appEvents : app.type === 'workspace' ? ['$.workspace.init'] : ['$.node.created','$.node.permissions.updated'];
     for (const name of events) entries.set(name,{type:'event',version:'1',description:systemDescription(name)});
-    const result: Record<string, any> = { versions: Object.create(null) };
-    const supplied = ['features', 'schemas', 'docs'].some((k) => Object.hasOwn(params, k));
-    for (const section of ['features', 'schemas', 'docs']) {
-      if ((supplied && !Object.hasOwn(params, section)) || (!supplied && section !== 'features'))
-        continue;
-      const selected = params[section] ?? '**';
-      const patterns = Array.isArray(selected) ? selected : [selected];
-      if (!patterns.every((v) => typeof v === 'string')) throw Error('Invalid help filter');
-      const values = Object.create(null);
-      for (const [name, f] of entries) {
-        if (!matchesName(patterns, name)) continue;
-        if (!supplied && [...entries.keys()].some((parent) => name.startsWith(parent + '.'))) continue;
-        const value =
-          section === 'features'
-            ? f.type.toUpperCase() + ';' + f.description
-            : section === 'schemas'
-              ? f.schema
-              : f.doc;
-        if (value !== undefined) {
-          values[name] = value;
-          result.versions[name] = f.version;
-        }
+    const names = [...entries.keys()];
+    for (const [group, summary] of Object.entries(systemGroups)) {
+      if (names.some(name => name.startsWith(group + '.')))
+        entries.set(group, {type:'document', version:'1', description:summary});
+    }
+    const provides = new Map<string, Record<string, number>>();
+    const nested = new Set<string>();
+    for (const [name, entry] of entries) {
+      let parent = name;
+      while (parent.includes('.')) {
+        parent = parent.slice(0, parent.lastIndexOf('.'));
+        if (!entries.has(parent)) continue;
+        nested.add(name);
+        const counts = provides.get(parent) ?? {};
+        const kind = entry.type + 's';
+        counts[kind] = (counts[kind] ?? 0) + 1;
+        provides.set(parent, counts);
       }
-      result[section] = values;
+    }
+    const result: Record<string, any> = Object.create(null);
+    for (const [name, entry] of entries) {
+      if (features === undefined ? nested.has(name) : !matchesName(features, name)) continue;
+      result[name] = {
+        type: entry.type, version: entry.version,
+        ...(description && {description: entry.description}),
+        ...(doc && entry.doc !== undefined && {doc: entry.doc}),
+        ...(schema && entry.schema !== undefined && {schema: entry.schema}),
+        ...(provides.has(name) && {provides: provides.get(name)}),
+      };
     }
     return result;
   }

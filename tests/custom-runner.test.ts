@@ -35,7 +35,7 @@ test('a registered IPC runner validates and receives its own settings without pr
     executors:{mode:'oneShot'}}});
   const {id}=await call('~','$.app.create',{name:'formatter',permissions:[],source:source('test:')});
   await assert.rejects(call(id,'$.app.manifest.set',{source:source(17)}),/registered runner schema/);
-  assert.equal(service.controller.help(actor.id,{node:id}).versions.format,'1');
+  assert.equal(service.controller.help(actor.id,{node:id}).format.version,'1');
   await call(id,'$.app.start',{});
   await assert.rejects(call('~','$.runners.restart',{name:'prepend',config:[]}),/config/);
   await call('~','$.runners.restart',{name:'prepend',config:{tool:'/private/new'}});
@@ -65,7 +65,7 @@ test('registered profile host reads an input through the actual caller file view
   await call(admin.id,'~','$.runners.add',{name:'fixture',entrypoint});
   const {id}=await call(admin.id,'~','$.profile.create',{name:'profile'});
   assert.deepEqual(await call(admin.id,id,'fixture.check',{file}),{bytes:16});
-  assert.equal(controller.help(admin.id,{node:id}).versions['fixture.check'],'1');
+  assert.equal(controller.help(admin.id,{node:id})['fixture.check'].version,'1');
   const restricted=store.create('~','user',{name:'reader',email:'reader@example.test',permissions:[{node:id,methods:'fixture.check'}]});
   store.setStatus(restricted.id,'working');
   await assert.rejects(call(restricted.id,id,'fixture.check',{file}),/unavailable or access denied/);

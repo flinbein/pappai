@@ -13,7 +13,7 @@ Declare an event in the publisher's `run.settings.features`. For example, `mail.
 }
 ```
 
-Give the receiver permission for events from the publisher, and add a manifest subscription. Here `mailbox-id` is the publisher's ID from `dir`. For the receiver to call a publisher method, it also needs `methods` permission.
+Give the receiver permission for events from the publisher, and add a manifest subscription. Here `mailbox-id` is the publisher's ID from `discover`. For the receiver to call a publisher method, it also needs `methods` permission.
 
 ```json
 {
@@ -54,7 +54,7 @@ A USER session can open `/ws/events` on the panel host. The WebSocket checks the
 
 A connection subscription has an ID, a source selector and event names. The commands `subscriptions.get/set/add/delete/enable/disable` manage the current tab's list. USER permissions determine the available sources and events. Delivery to a USER succeeds when at least one matching connection receives the event. The controller does not retain missed events for the next sign-in.
 
-The connection supports `dir`, `help`, `call`, `publish` and `cancel`. To cancel an outstanding `call` with ID 42 on that connection, pass `{"id":42}` to `cancel`. Disconnecting cancels the connection's outstanding calls.
+The connection supports `discover`, `help`, `call`, `publish` and `cancel`. To cancel an outstanding `call` with ID 42 on that connection, pass `{"id":42}` to `cancel`. Disconnecting cancels the connection's outstanding calls.
 
 ## Delivery reports
 
