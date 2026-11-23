@@ -197,8 +197,14 @@ try {
   await management.getByRole('button',{name:'Остановить',exact:true}).click();
   assert.match((await waiting).error.message,/stop/i);
   assert.equal((await inProgress).result,'finished');
-  await management.getByRole('button',{name:'Обновить состояние'}).click();
-  await management.getByText('Остановлена',{exact:true}).waitFor();
+  // The final call can resolve while the worker is still shutting down. This
+  // view refreshes on request, so poll via the same action as the user.
+  const stopped = management.getByText('Остановлена',{exact:true});
+  for (let attempt=0; attempt<50 && !(await stopped.isVisible()); attempt++) {
+    await management.getByRole('button',{name:'Обновить состояние'}).click();
+    await sleep(100);
+  }
+  assert.ok(await stopped.isVisible(), 'APP finished stopping');
   const updated = structuredClone(manifest);
   updated.run.settings.features['message.extractText'].version='2';
   await save({manifest:updated});
@@ -209,13 +215,9 @@ try {
   const originalScript = await direct.page.locator('script[type=module][src]').first().getAttribute('src');
   assert.ok(originalScript.startsWith('/_web/'+bundledVersion+'/'));
   await direct.page.waitForFunction(() => document.querySelector('.xterm-rows')?.textContent.includes('#'));
-  await direct.command('echo $$ > /tmp/web-shell-before');
-  try {
-    await exists('/tmp/web-shell-before');
-  } catch (error) {
-    throw new Error('Terminal output: ' + await direct.page.locator('.xterm-rows').textContent(), {cause:error});
-  }
-  const originalShell = docker('exec', runId, 'cat', '/tmp/web-shell-before');
+  // This is the only interactive shell in the disposable controller. Read its
+  // PID independently, then ask the original tab for $$ after switching releases.
+  const originalShell = docker('exec', runId, 'pgrep', '-xf', 'sh -i');
   assert.match(originalShell, /^[1-9]\d*$/);
   const nextVersion = '0.0.0-browser-acceptance';
   activateWebRelease(nextVersion);

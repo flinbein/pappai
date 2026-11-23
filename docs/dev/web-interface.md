@@ -9,13 +9,13 @@ The default Compose configuration mounts `./web-releases` read-only at `/run/pap
 Run the following on the machine that owns the writable release directory. Use the version of pappai-web whose API is compatible with your controller. The installer uses Node.js, npm and tar.
 
 ```sh
-npm run web:install -- 0.1.0 ./web-releases
+npm run web:install -- 0.1.1 ./web-releases
 ```
 
 On a Docker-only host, run the installer in a temporary container using the controller image and the same host directory. With the default Compose configuration:
 
 ```sh
-docker run --rm -v "$PWD/web-releases:/web" "$(docker compose images -q controller)" npm run web:install -- 0.1.0 /web
+docker run --rm -v "$PWD/web-releases:/web" "$(docker compose images -q controller)" npm run web:install -- 0.1.1 /web
 ```
 
 The installer reuses a retained release or the bundled package when versions match. For other versions it fetches the exact npm package. It checks both entry points and their assets, then atomically selects the release by replacing `current`. New page loads use that release immediately. Existing pages and terminal sockets continue on their original release. Reloading the terminal tab closes its shell.
