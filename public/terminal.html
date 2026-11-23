@@ -2,15 +2,43 @@
 <html lang="ru">
   <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
     <title>Терминал · pappai</title>
     <link rel="stylesheet" href="/xterm.css">
     <link rel="stylesheet" href="/style.css">
     <script type="module" src="/terminal.js"></script>
   </head>
   <body class="terminal-page">
-    <header><strong>Терминал</strong><span id="state" role="status">Подключение…</span>
-      <button id="disconnect" type="button">Закрыть</button></header>
+    <header><div class="terminal-title"><strong>Терминал</strong><span id="state" role="status">Подключение…</span></div>
+      <button id="copy" type="button">Копировать</button><button id="paste" type="button" disabled>Вставить</button>
+      <button id="fullscreen" type="button" aria-label="На весь экран" title="На весь экран" hidden>⛶</button>
+      <button id="disconnect" type="button" aria-label="Закрыть терминал" title="Закрыть терминал">×</button></header>
     <div id="screen" aria-label="Терминал контейнера"></div>
+    <div id="terminal-notice" role="status"></div>
+    <div id="keybar" aria-label="Клавиши терминала" role="group">
+      <div class="key-row">
+        <button data-key="Escape">Esc</button><button data-key="Tab">Tab</button>
+        <button id="ctrl" aria-pressed="false">Ctrl</button>
+        <button data-key="ArrowLeft" aria-label="Влево">←</button><button data-key="ArrowDown" aria-label="Вниз">↓</button>
+        <button data-key="ArrowUp" aria-label="Вверх">↑</button><button data-key="ArrowRight" aria-label="Вправо">→</button>
+        <button id="more" aria-expanded="false" aria-controls="extra-keys" aria-label="Дополнительные клавиши и размер шрифта">⋯</button>
+      </div>
+      <div id="extra-keys" hidden>
+        <div class="key-row">
+          <button id="alt" aria-pressed="false">Alt</button><button data-key="Home">Home</button><button data-key="End">End</button>
+          <button data-key="PageUp">PgUp</button><button data-key="PageDown">PgDn</button>
+          <button data-key="/">/</button><button data-key="|">|</button><button data-key="-">-</button>
+        </div>
+        <div class="font-row"><span>Шрифт</span>
+          <button id="smaller" aria-label="Уменьшить шрифт">A−</button>
+          <button id="font-reset" aria-label="Сбросить размер шрифта" title="Сбросить размер шрифта"></button>
+          <button id="larger" aria-label="Увеличить шрифт">A+</button>
+        </div>
+      </div>
+    </div>
+    <dialog id="clipboard-dialog" aria-labelledby="clipboard-label"><label for="clipboard-text" id="clipboard-label"></label>
+      <textarea id="clipboard-text" rows="7" spellcheck="false"></textarea>
+      <div class="clipboard-actions"><button id="clipboard-close">Закрыть</button><button id="clipboard-apply"></button></div>
+    </dialog>
   </body>
 </html>

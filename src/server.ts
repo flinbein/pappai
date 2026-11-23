@@ -23,6 +23,7 @@ const assets = new Map(
     '/style.css': ['style.css', 'text/css'],
     '/terminal': ['terminal.html', 'text/html'],
     '/terminal.js': ['terminal.js', 'text/javascript'],
+    '/terminal-controls.js': ['terminal-controls.js', 'text/javascript'],
     '/xterm.mjs': ['../node_modules/@xterm/xterm/lib/xterm.mjs', 'text/javascript'],
     '/xterm.css': ['../node_modules/@xterm/xterm/css/xterm.css', 'text/css'],
     '/fit.mjs': ['../node_modules/@xterm/addon-fit/lib/addon-fit.mjs', 'text/javascript'],

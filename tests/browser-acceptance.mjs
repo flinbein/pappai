@@ -30,8 +30,8 @@ async function waitForService(origin) {
   }
   throw new Error("Controller did not start");
 }
-async function panel(browser, origin) {
-  const context = await browser.newContext();
+async function panel(browser, origin, options = {}) {
+  const context = await browser.newContext(options);
   const page = await context.newPage();
   const devtools = await context.newCDPSession(page);
   await devtools.send("WebAuthn.enable");
@@ -134,7 +134,7 @@ try {
   const info = await rpc(admin,"help",{node:app,features:"message.extractText"});
   assert.equal(info["message.extractText"].version,"1");
   assert.equal(await call(app,"message.extractText",{text:"  Привет  "}),"Привет");
-  const limited = await panel(browser,origin);
+  const limited = await panel(browser,origin,{hasTouch:true});
   await register(limited,userEmail,docker("exec",runId,"node","src/admin.ts","otp",userEmail));
   await rpc(limited,"call",{node:app,method:"message.extractText",data:{text:"  Привет  "}},/Permission denied/);
   await rpc(limited,"call",{node:app,method:"$.app.manifest.get"},/Permission denied/);
@@ -187,6 +187,66 @@ try {
   await optional.page.close();
   // Record results on the test container filesystem via the interactive PTY.
   const tmp = '/var/lib/pappai/tmp/' + user;
+  await jailed.page.setViewportSize({width:375,height:640});
+  const termPage = jailed.page;
+  const tapKey = key => termPage.locator('[data-key="'+key+'"]').tap();
+  assert.ok(await termPage.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  await termPage.locator('#more').click();
+  await jailed.command('stty size >/tmp/font-before');
+  await exists(tmp+'/font-before');
+  await termPage.locator('#larger').click();
+  await jailed.command('stty size >/tmp/font-after');
+  await exists(tmp+'/font-after');
+  const columns = file => Number(docker('exec',runId,'cat',tmp+'/'+file).split(/\s+/)[1]);
+  assert.ok(columns('font-before') > columns('font-after'));
+  assert.ok(await termPage.evaluate(() => Number(localStorage.getItem('terminal.fontSize')) > 0));
+  await termPage.locator('#font-reset').click();
+  if (await termPage.locator('#fullscreen').isVisible()) {
+    await termPage.locator('#fullscreen').click();
+    await termPage.waitForFunction(() => !!document.fullscreenElement);
+    await termPage.locator('#fullscreen').click();
+    await termPage.waitForFunction(() => !document.fullscreenElement);
+  }
+  const expected = '\x03\x1bx\x1b\t\x1b[D\x1b[B\x1b[A\x1b[C\x1b[H\x1b[F\x1b[5~\x1b[6~/|-first\rsecond';
+  await jailed.command(`python3 -c 'import sys,tty,termios; t=termios.tcgetattr(0); tty.setraw(0); print("\\033[?2004l",end="",flush=True); open("/tmp/input-ready","w").write("1"); b=sys.stdin.buffer.read(${expected.length}); termios.tcsetattr(0,termios.TCSANOW,t); open("/tmp/key-bytes","w").write(b.hex())'`);
+  await exists(tmp+'/input-ready');
+  await termPage.locator('#ctrl').tap();
+  assert.equal(await termPage.locator('#ctrl').getAttribute('aria-pressed'),'true');
+  await termPage.keyboard.insertText('c');
+  assert.equal(await termPage.locator('#ctrl').getAttribute('aria-pressed'),'false');
+  await termPage.locator('#alt').click();
+  await termPage.keyboard.insertText('x');
+  for (const k of ['Escape','Tab','ArrowLeft','ArrowDown','ArrowUp','ArrowRight','Home','End','PageUp','PageDown','/','|','-']) await tapKey(k);
+  assert.ok(await termPage.locator('.xterm-helper-textarea').evaluate(e=>e===document.activeElement));
+  // Exercise the manual fallback, including multiple lines sent as a single paste.
+  await termPage.evaluate(() => Object.defineProperty(navigator.clipboard,'readText',{configurable:true,value:async()=>{throw Error('denied');}}));
+  await termPage.locator('#paste').click();
+  await termPage.locator('#clipboard-text').fill('first\nsecond');
+  await termPage.locator('#clipboard-apply').click();
+  await exists(tmp+'/key-bytes');
+  assert.equal(docker('exec',runId,'cat',tmp+'/key-bytes'),Buffer.from(expected).toString('hex'));
+  await termPage.evaluate(() => delete navigator.clipboard.readText);
+  await termPage.context().grantPermissions(['clipboard-read','clipboard-write'],{origin});
+  await termPage.bringToFront();
+  await termPage.evaluate(() => navigator.clipboard.writeText('echo clipboard-ok >/tmp/clipboard-ok'));
+  await termPage.locator('#paste').click();
+  await termPage.waitForFunction(() => document.activeElement?.classList.contains('xterm-helper-textarea'));
+  await termPage.waitForFunction(() => document.querySelector('.xterm-rows')?.textContent.includes('clipboard-ok'));
+  await termPage.keyboard.press('Enter');
+  await exists(tmp+'/clipboard-ok');
+  await termPage.locator('#copy').click();
+  const copyField = termPage.locator('#clipboard-text');
+  await copyField.evaluate(e => {const i=e.value.indexOf('clipboard-ok');if(i<0) throw Error('Missing terminal output');e.setSelectionRange(i,i+12);});
+  await termPage.locator('#clipboard-apply').click();
+  assert.equal(await termPage.evaluate(() => navigator.clipboard.readText()),'clipboard-ok');
+  await jailed.command("printf 'clip%s\\n' boardproof");
+  const marker = termPage.locator('.xterm-rows > div').filter({hasText:/^clipboardproof\s*$/});
+  await marker.waitFor();
+  const row = await marker.boundingBox();
+  await termPage.mouse.dblclick(row.x+8,row.y+row.height/2);
+  await termPage.locator('#copy').click();
+  await termPage.waitForFunction(async () => await navigator.clipboard.readText() === 'clipboardproof');
+  await termPage.locator('#more').click();
   await jailed.page.setViewportSize({width: 800, height: 600});
   await jailed.command('test -t 0 && test -t 1 && test ! -e /opt/pappai/src && stty size > /tmp/size');
   await jailed.command("nohup sh -c 'echo ready >/tmp/ready; while test ! -f /tmp/release; do sleep .1; done; echo survived >/tmp/leak' </dev/null >/dev/null 2>&1 &");
@@ -202,7 +262,8 @@ try {
   await exists('/tmp/direct-ready');
   assert.match(docker('exec', runId, 'cat', tmp + '/size'), /^[1-9]\d* [1-9]\d*$/);
   await jailed.command('sleep 30');
-  await jailed.page.keyboard.press('Control+c');
+  await jailed.page.locator('#ctrl').click();
+  await jailed.page.keyboard.press('c');
   await jailed.command('echo ok > /tmp/interrupt');
   await exists(tmp + '/interrupt');
   await direct.page.close();

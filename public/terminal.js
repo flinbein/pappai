@@ -1,5 +1,6 @@
 import {Terminal} from '/xterm.mjs';
 import {FitAddon} from '/fit.mjs';
+import {attachControls} from '/terminal-controls.js';
 
 const screen = document.getElementById('screen');
 const state = document.getElementById('state');
@@ -20,7 +21,8 @@ function input(data) {
     ws.send(data.subarray(i, i + 16384));
   }
 }
-term.onData(data => input(encoder.encode(data)));
+const connected = attachControls(term, resize, data => input(encoder.encode(data)));
+connected(false);
 term.onBinary(data => input(Uint8Array.from(data, ch => ch.charCodeAt(0))));
 function resize() {
   fit.fit();
@@ -28,7 +30,7 @@ function resize() {
 }
 const observer = new ResizeObserver(resize);
 observer.observe(screen);
-ws.onopen = () => { resize(); term.focus(); };
+ws.onopen = () => { connected(true); resize(); term.focus(); };
 ws.onmessage = ({data}) => {
   if (typeof data !== 'string') {
     term.write(new Uint8Array(data), () => {
@@ -42,10 +44,13 @@ ws.onmessage = ({data}) => {
 };
 ws.onerror = () => { issue ||= 'Соединение недоступно. Проверьте вход в панель.'; };
 ws.onclose = () => {
+  connected(false);
   observer.disconnect();
   term.options.disableStdin = true;
   state.textContent = issue || 'Терминал закрыт';
   button.textContent = 'Открыть новый';
+  button.title = button.ariaLabel = 'Открыть новый терминал';
+  button.dataset.closed = '';
   button.onclick = () => location.reload();
 };
 button.onclick = () => ws.close();
