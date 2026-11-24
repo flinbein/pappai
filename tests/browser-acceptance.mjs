@@ -109,7 +109,7 @@ async function rpc(page, operation, params, expectedError) {
   return JSON.parse(await page.locator('#output').textContent());
 }
 
-async function touchStroke(page, selector, dx, dy, fingers = 1) {
+async function touchStroke(page, selector, dx, dy, fingers = 1, holdMs = 0) {
   const key = page.locator(selector);
   await key.scrollIntoViewIfNeeded();
   const rect = await key.boundingBox();
@@ -119,6 +119,7 @@ async function touchStroke(page, selector, dx, dy, fingers = 1) {
   const cdp = await page.context().newCDPSession(page);
   try {
     await cdp.send('Input.dispatchTouchEvent', {type:'touchStart', touchPoints:points});
+    if (holdMs) await sleep(holdMs);
     if (dx || dy) await cdp.send('Input.dispatchTouchEvent', {type:'touchMove',
       touchPoints:points.map(p => ({...p, x:p.x+dx, y:p.y+dy}))});
     await cdp.send('Input.dispatchTouchEvent', {type:'touchEnd', touchPoints:[]});
@@ -392,22 +393,40 @@ try {
   }
   await jailed.command('stty size >/tmp/font-before');
   await exists(tmp+'/font-before');
-  await touchStroke(termPage, '#font-pad', 0, -40);
+  await termPage.locator('#terminal-tools').tap();
+  await termPage.locator('#font-up').tap();
   await jailed.command('stty size >/tmp/font-after');
   await exists(tmp+'/font-after');
   const columns = file => Number(docker('exec',runId,'cat',tmp+'/'+file).split(/\s+/)[1]);
   assert.ok(columns('font-before') > columns('font-after'));
   assert.ok(await termPage.evaluate(() => Number(localStorage.getItem('terminal.fontSize')) > 0));
-  await termPage.locator('#font-pad').click({delay:650});
+  const fontSize = () => termPage.evaluate(() => localStorage.getItem('terminal.fontSize'));
+  const enlarged = await fontSize();
+  await termPage.locator('#font-down').click({delay:650});
+  assert.equal(await fontSize(), enlarged);
+  assert.match(await termPage.locator('.terminal-hint').textContent(), /Decrease/);
+  await termPage.locator('#font-down').tap();
+  assert.equal(Number(await fontSize()), Number(enlarged) - 1);
   if (await termPage.locator('#fullscreen').isVisible()) {
+    await touchStroke(termPage, '#fullscreen', 0, 0, 1, 650);
+    assert.equal(await termPage.evaluate(() => Boolean(document.fullscreenElement)), false);
     await termPage.locator('#fullscreen').click();
-    await termPage.waitForFunction(() => !!document.fullscreenElement);
+    await termPage.waitForFunction(() => document.fullscreenElement?.matches('.terminal-view'));
+    assert.equal(await termPage.locator(':fullscreen .terminal-statusbar').count(), 0);
+    assert.equal(await termPage.locator(':fullscreen #screen').evaluate(e => e.getBoundingClientRect().top), 0);
     await termPage.locator('#fullscreen').click();
     await termPage.waitForFunction(() => !document.fullscreenElement);
   }
-  const expected = '\x03\x1bx\x1b\t\x1b[D\x1b[B\x1b[A\x1b[C\x1b[H\x1b[F\x1b[5~\x1b[6~/|-first\rsecond';
+  await termPage.locator('#terminal-input').tap();
+  const expected = 'Q\x1b[Z\x03\x1bx\x1b\t\x1b[D\x1b[B\x1b[A\x1b[C\x1b[H\x1b[F\x1b[5~\x1b[6~/|-first\rsecond';
   await jailed.command(`python3 -c 'import sys,tty,termios; t=termios.tcgetattr(0); tty.setraw(0); print("\\033[?2004l",end="",flush=True); open("/tmp/input-ready","w").write("1"); b=sys.stdin.buffer.read(${expected.length}); termios.tcsetattr(0,termios.TCSANOW,t); open("/tmp/key-bytes","w").write(b.hex())'`);
   await exists(tmp+'/input-ready');
+  await touchStroke(termPage, '#shift', 0, 0, 1, 650);
+  assert.equal(await termPage.locator('#shift').getAttribute('aria-pressed'), 'false');
+  await termPage.locator('#shift').tap();
+  await termPage.keyboard.insertText('q');
+  await termPage.locator('#shift').tap();
+  await termPage.locator('#tab').tap();
   await termPage.locator('#ctrl').tap();
   assert.equal(await termPage.locator('#ctrl').getAttribute('aria-pressed'),'true');
   await termPage.keyboard.insertText('c');
@@ -420,9 +439,10 @@ try {
   for (const key of ['Home','End','PageUp','PageDown']) await termPage.keyboard.press(key);
   await termPage.keyboard.insertText('/|-');
   assert.ok(await termPage.locator('.xterm-helper-textarea').evaluate(e=>e===document.activeElement));
+  await termPage.locator('#terminal-tools').tap();
   // Exercise the manual fallback, including multiple lines sent as a single paste.
   await termPage.evaluate(() => Object.defineProperty(navigator.clipboard,'readText',{configurable:true,value:async()=>{throw Error('denied');}}));
-  await touchStroke(termPage, '#clipboard', 0, -20);
+  await termPage.locator('#paste').tap();
   await termPage.locator('#paste-input').fill('first\nsecond');
   await exists(tmp+'/key-bytes');
   assert.equal(docker('exec',runId,'cat',tmp+'/key-bytes'),Buffer.from(expected).toString('hex'));
@@ -430,12 +450,12 @@ try {
   await termPage.context().grantPermissions(['clipboard-read','clipboard-write'],{origin});
   await termPage.bringToFront();
   await termPage.evaluate(() => navigator.clipboard.writeText('echo clipboard-ok >/tmp/clipboard-ok'));
-  await touchStroke(termPage, '#clipboard', 0, -20);
+  await termPage.locator('#paste').tap();
   await termPage.waitForFunction(() => document.activeElement?.classList.contains('xterm-helper-textarea'));
   await termPage.waitForFunction(() => document.querySelector('.xterm-rows')?.textContent.includes('clipboard-ok'));
   await termPage.keyboard.press('Enter');
   await exists(tmp+'/clipboard-ok');
-  await touchStroke(termPage, '#clipboard', 0, 20);
+  await termPage.locator('#copy').tap();
   const copyField = termPage.locator('#clipboard-text');
   await copyField.evaluate(e => {const i=e.value.indexOf('clipboard-ok');if(i<0) throw Error('Missing terminal output');e.setSelectionRange(i,i+12);});
   await termPage.locator('#clipboard-apply').click();
@@ -445,8 +465,9 @@ try {
   await marker.waitFor();
   const row = await marker.boundingBox();
   await termPage.mouse.dblclick(row.x+8,row.y+row.height/2);
-  await touchStroke(termPage, '#clipboard', 0, 20);
+  await termPage.locator('#copy').tap();
   await termPage.waitForFunction(async () => await navigator.clipboard.readText() === 'clipboardproof');
+  await termPage.locator('#terminal-input').tap();
   await jailed.page.setViewportSize({width: 800, height: 600});
   await jailed.command('test -t 0 && test -t 1 && test ! -e /opt/pappai/src && stty size > /tmp/size');
   await jailed.command("nohup sh -c 'echo ready >/tmp/ready; while test ! -f /tmp/release; do sleep .1; done; echo survived >/tmp/leak' </dev/null >/dev/null 2>&1 &");
