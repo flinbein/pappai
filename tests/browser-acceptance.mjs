@@ -72,23 +72,30 @@ async function register(page, email, code) {
   await page.locator("#activate button").click();
   await page.locator("#workspace").waitFor({state:"visible"});
 }
-async function terminal(panel, sandbox, link = 'Открыть терминал') {
-  const popup = panel.waitForEvent('popup');
-  await panel.getByRole('link', {name: link, exact: true}).click();
-  const page = await popup;
-  await page.getByText(sandbox ? 'В песочнице' : 'Без песочницы', {exact: true}).waitFor();
+async function accountAction(page, selector) {
+  const menu = page.locator('.account-menu');
+  await menu.waitFor({state:'attached'});
+  if (!await menu.isVisible()) await page.locator('.breadcrumbs button').first().click();
+  if (!await menu.evaluate(element => element.open)) await menu.locator('summary').click();
+  await menu.locator(selector).click();
+}
+async function terminal(page, sandbox, forced = false) {
+  if (forced) await accountAction(page, '#isolated-terminal');
+  else await page.locator('#nav-terminal').click();
+  await page.locator('.terminal-state[data-state=online]').filter({
+    hasText:sandbox ? 'В песочнице' : 'Без песочницы'}).waitFor();
+  await page.waitForFunction(() => /[#$]\s*$/.test(document.querySelector('.xterm-rows')?.textContent ?? ''));
   const input = page.locator('.xterm-helper-textarea');
-  await input.focus();
   async function command(line) {
     await page.bringToFront();
     await input.focus();
-    await page.keyboard.type(line);
+    await page.keyboard.insertText(line);
     await page.keyboard.press('Enter');
   }
   return {page, command};
 }
 async function rpc(page, operation, params, expectedError) {
-  await page.locator("#nav-rpc").click();
+  if (new URL(page.url()).pathname !== '/rpc') await accountAction(page, '#nav-rpc');
   await page.locator("#operation").selectOption(operation);
   await page.locator("#params").fill(JSON.stringify(params));
   await page.locator("#invoke button").click();
@@ -100,6 +107,78 @@ async function rpc(page, operation, params, expectedError) {
     (document.querySelector('#output').textContent || document.querySelector('#notice').textContent));
   assert.equal(await page.locator('#notice').textContent(), '');
   return JSON.parse(await page.locator('#output').textContent());
+}
+
+async function touchStroke(page, selector, dx, dy, fingers = 1) {
+  const key = page.locator(selector);
+  await key.scrollIntoViewIfNeeded();
+  const rect = await key.boundingBox();
+  const points = Array.from({length:fingers}, (_, i) => ({
+    id:i+1, x:rect.x+rect.width/2+i*25, y:rect.y+rect.height/2,
+  }));
+  const cdp = await page.context().newCDPSession(page);
+  try {
+    await cdp.send('Input.dispatchTouchEvent', {type:'touchStart', touchPoints:points});
+    if (dx || dy) await cdp.send('Input.dispatchTouchEvent', {type:'touchMove',
+      touchPoints:points.map(p => ({...p, x:p.x+dx, y:p.y+dy}))});
+    await cdp.send('Input.dispatchTouchEvent', {type:'touchEnd', touchPoints:[]});
+  } finally {
+    await cdp.detach();
+  }
+}
+
+async function checkMethodLink(context, origin, app) {
+  const page = await context.newPage();
+  const url = origin + '/nodes/' + app + '/methods/message.extractText';
+  const calls = [];
+  page.on('websocket', socket => socket.on('framesent', ({payload}) => {
+    if (!socket.url().endsWith('/api/ws/web')) return;
+    const message = JSON.parse(payload);
+    if (message.method === 'call' && message.params.method === 'message.extractText') calls.push(message);
+  }));
+  await page.setViewportSize({width:390, height:760});
+  await page.goto(url);
+  const form = page.locator('#method-call');
+  await form.waitFor();
+  const draft = '{"text":"  bookmarked  "}';
+  await page.locator('#arguments').fill(draft);
+  const historyLength = await page.evaluate(() => history.length);
+  for (const [index, pane] of ['tree','node','action'].entries()) {
+    await page.locator('.breadcrumbs button').nth(index).click();
+    await page.locator('#workspace[data-pane="'+pane+'"]').waitFor();
+    assert.equal(page.url(), url);
+    assert.equal(await form.isVisible(), pane === 'action');
+    const visible = await Promise.all(['.directory','#node-content','.action-column'].map(s => page.locator(s).isVisible()));
+    assert.deepEqual(visible, [0,1,2].map(n => n === index));
+  }
+  assert.equal(await page.evaluate(() => history.length), historyLength);
+  assert.equal(await page.locator('#arguments').inputValue(), draft);
+  assert.equal(calls.length, 0);
+  await page.locator('#arguments').fill('{');
+  await form.getByRole('button').click();
+  await page.locator('#method-result').filter({hasText:'Проверьте JSON'}).waitFor();
+  assert.equal(calls.length, 0);
+  await page.locator('#arguments').fill(draft);
+  await form.getByRole('button').click();
+  await page.locator('#method-result').filter({hasText:'bookmarked'}).waitFor();
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].params.data, JSON.parse(draft));
+  await page.reload();
+  await form.waitFor();
+  assert.equal(calls.length, 1);
+  await page.setViewportSize({width:1280,height:800});
+  const columns = await Promise.all(['.directory','#node-content','.action-column'].map(s => page.locator(s).boundingBox()));
+  assert.ok(columns.every(Boolean) && columns[0].x < columns[1].x && columns[1].x < columns[2].x);
+  await page.locator('[data-node="~"]').click();
+  await page.locator('[data-action="create/team"]').click();
+  await page.waitForURL(origin+'/nodes/~/create/team');
+  await page.reload();
+  await page.locator('#create-node').waitFor();
+  assert.equal(await page.locator('dialog[open]').count(), 0);
+  await page.goBack();
+  await page.waitForURL(origin+'/nodes/~');
+  await page.close();
+  console.log('PASS: direct method and create links, responsive panes, shared draft and explicit JSON submission');
 }
 
 async function observePanel(context, origin) {
@@ -161,7 +240,7 @@ try {
   const admin = await panel(browser,origin);
   const adminEmail = "admin@example.test";
   await register(admin,adminEmail,docker("exec",runId,"node","src/admin.ts","admin",adminEmail));
-  await admin.locator("#logout").click();
+  await accountAction(admin, '#logout');
   await admin.locator("#login").click();
   await admin.locator("#workspace").waitFor({state:"visible"});
   if (process.env.PAPPAI_BROWSER_CODEX_DIST) {
@@ -198,11 +277,13 @@ try {
   const info = await rpc(admin,"help",{node:app,features:"message.extractText"});
   assert.equal(info["message.extractText"].version,"1");
   assert.equal(await call(app,"message.extractText",{text:"  Привет  "}),"Привет");
+  await checkMethodLink(admin.context(), origin, app);
   const limited = await panel(browser,origin,{hasTouch:true});
   await register(limited,userEmail,docker("exec",runId,"node","src/admin.ts","otp",userEmail));
   await rpc(limited,"call",{node:app,method:"message.extractText",data:{text:"  Привет  "}},/Permission denied/);
   await rpc(limited,"call",{node:app,method:"$.app.manifest.get"},/Permission denied/);
   await admin.getByRole('button',{name:'Extract',exact:true}).click({timeout:3000});
+  await admin.locator('#show-management').click();
   const management = admin.locator('#app-management');
   await management.locator('#manifest-details summary').click();
   const editor = management.getByLabel('Источник манифеста JSON');
@@ -251,7 +332,20 @@ try {
   await management.getByRole('button',{name:'Запустить',exact:true}).click();
   await management.getByText('Работает',{exact:true}).waitFor();
   assert.equal(await rpc(admin,'call',{node:app,method:'message.extractText',version:'2',data:{text:' v2 '}}),'v2');
-  const direct = await terminal(admin, false);
+  const directTab = await admin.context().newPage();
+  const sockets = [];
+  directTab.on('websocket', ws => { if (ws.url().includes('/api/ws/terminal')) sockets.push(ws); });
+  await directTab.goto(origin);
+  const direct = await terminal(directTab, false);
+  await direct.command('export PANEL_TEST=still_here');
+  await direct.page.locator('[data-node="~"]').click();
+  await direct.page.locator('#nav-terminal .online-dot').waitFor();
+  assert.equal(await direct.page.locator('.terminal-view').isVisible(), false);
+  await direct.page.locator('#nav-terminal').click();
+  await direct.command('echo "$PANEL_TEST" >/tmp/pane-return');
+  await exists('/tmp/pane-return');
+  assert.equal(docker('exec', runId, 'cat', '/tmp/pane-return'), 'still_here');
+  assert.equal(sockets.length, 1);
   const originalScript = await direct.page.locator('script[type=module][src]').first().getAttribute('src');
   assert.ok(originalScript.startsWith('/_web/'+bundledVersion+'/'));
   await direct.page.waitForFunction(() => document.querySelector('.xterm-rows')?.textContent.includes('#'));
@@ -274,24 +368,37 @@ try {
   await exists('/tmp/web-release-session');
   assert.equal(docker('exec', runId, 'cat', '/tmp/web-release-session'), originalShell);
   const jailed = await terminal(limited, true);
-  const optional = await terminal(admin, true, 'Открыть в песочнице');
-  await optional.page.close();
+  const optional = await terminal(admin, true, true);
+  await optional.command("printf 'closed%s\\n' scrollback; exit");
+  await admin.locator('.terminal-state[data-state=closed]').waitFor();
+  await admin.locator('[data-node="~"]').click();
+  assert.equal(await admin.locator('#nav-terminal .online-dot').count(), 0);
+  await admin.locator('#nav-terminal').click();
+  await admin.getByRole('button', {name:'New terminal'}).waitFor();
+  assert.match(await admin.locator('.xterm-rows').textContent(), /closedscrollback/);
+  assert.ok(await admin.locator('#ctrl').isDisabled());
+  await admin.getByRole('button', {name:'New terminal'}).click();
+  await admin.locator('.terminal-state[data-state=online]').filter({hasText:'В песочнице'}).waitFor();
+  await admin.getByRole('button', {name:'Close terminal'}).click();
+  await admin.locator('.terminal-state[data-state=closed]').waitFor();
   // Record results on the test container filesystem via the interactive PTY.
   const tmp = '/var/lib/pappai/tmp/' + user;
   await jailed.page.setViewportSize({width:375,height:640});
   const termPage = jailed.page;
-  const tapKey = key => termPage.locator('[data-key="'+key+'"]').tap();
   assert.ok(await termPage.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
-  await termPage.locator('#more').click();
+  if (await termPage.locator('.terminal-toolbar').isHidden()) {
+    await touchStroke(termPage, '#screen', 0, 0, 2);
+    await termPage.locator('.terminal-toolbar').waitFor();
+  }
   await jailed.command('stty size >/tmp/font-before');
   await exists(tmp+'/font-before');
-  await termPage.locator('#larger').click();
+  await touchStroke(termPage, '#font-pad', 0, -40);
   await jailed.command('stty size >/tmp/font-after');
   await exists(tmp+'/font-after');
   const columns = file => Number(docker('exec',runId,'cat',tmp+'/'+file).split(/\s+/)[1]);
   assert.ok(columns('font-before') > columns('font-after'));
   assert.ok(await termPage.evaluate(() => Number(localStorage.getItem('terminal.fontSize')) > 0));
-  await termPage.locator('#font-reset').click();
+  await termPage.locator('#font-pad').click({delay:650});
   if (await termPage.locator('#fullscreen').isVisible()) {
     await termPage.locator('#fullscreen').click();
     await termPage.waitForFunction(() => !!document.fullscreenElement);
@@ -307,25 +414,28 @@ try {
   assert.equal(await termPage.locator('#ctrl').getAttribute('aria-pressed'),'false');
   await termPage.locator('#alt').click();
   await termPage.keyboard.insertText('x');
-  for (const k of ['Escape','Tab','ArrowLeft','ArrowDown','ArrowUp','ArrowRight','Home','End','PageUp','PageDown','/','|','-']) await tapKey(k);
+  await termPage.locator('[data-key=Escape]').tap();
+  await termPage.locator('#tab').tap();
+  for (const [dx,dy] of [[-20,0],[0,20],[0,-20],[20,0]]) await touchStroke(termPage, '#arrow-pad', dx, dy);
+  for (const key of ['Home','End','PageUp','PageDown']) await termPage.keyboard.press(key);
+  await termPage.keyboard.insertText('/|-');
   assert.ok(await termPage.locator('.xterm-helper-textarea').evaluate(e=>e===document.activeElement));
   // Exercise the manual fallback, including multiple lines sent as a single paste.
   await termPage.evaluate(() => Object.defineProperty(navigator.clipboard,'readText',{configurable:true,value:async()=>{throw Error('denied');}}));
-  await termPage.locator('#paste').click();
-  await termPage.locator('#clipboard-text').fill('first\nsecond');
-  await termPage.locator('#clipboard-apply').click();
+  await touchStroke(termPage, '#clipboard', 0, -20);
+  await termPage.locator('#paste-input').fill('first\nsecond');
   await exists(tmp+'/key-bytes');
   assert.equal(docker('exec',runId,'cat',tmp+'/key-bytes'),Buffer.from(expected).toString('hex'));
   await termPage.evaluate(() => delete navigator.clipboard.readText);
   await termPage.context().grantPermissions(['clipboard-read','clipboard-write'],{origin});
   await termPage.bringToFront();
   await termPage.evaluate(() => navigator.clipboard.writeText('echo clipboard-ok >/tmp/clipboard-ok'));
-  await termPage.locator('#paste').click();
+  await touchStroke(termPage, '#clipboard', 0, -20);
   await termPage.waitForFunction(() => document.activeElement?.classList.contains('xterm-helper-textarea'));
   await termPage.waitForFunction(() => document.querySelector('.xterm-rows')?.textContent.includes('clipboard-ok'));
   await termPage.keyboard.press('Enter');
   await exists(tmp+'/clipboard-ok');
-  await termPage.locator('#copy').click();
+  await touchStroke(termPage, '#clipboard', 0, 20);
   const copyField = termPage.locator('#clipboard-text');
   await copyField.evaluate(e => {const i=e.value.indexOf('clipboard-ok');if(i<0) throw Error('Missing terminal output');e.setSelectionRange(i,i+12);});
   await termPage.locator('#clipboard-apply').click();
@@ -335,9 +445,8 @@ try {
   await marker.waitFor();
   const row = await marker.boundingBox();
   await termPage.mouse.dblclick(row.x+8,row.y+row.height/2);
-  await termPage.locator('#copy').click();
+  await touchStroke(termPage, '#clipboard', 0, 20);
   await termPage.waitForFunction(async () => await navigator.clipboard.readText() === 'clipboardproof');
-  await termPage.locator('#more').click();
   await jailed.page.setViewportSize({width: 800, height: 600});
   await jailed.command('test -t 0 && test -t 1 && test ! -e /opt/pappai/src && stty size > /tmp/size');
   await jailed.command("nohup sh -c 'echo ready >/tmp/ready; while test ! -f /tmp/release; do sleep .1; done; echo survived >/tmp/leak' </dev/null >/dev/null 2>&1 &");
@@ -358,8 +467,11 @@ try {
   await jailed.command('echo ok > /tmp/interrupt');
   await exists(tmp + '/interrupt');
   await direct.page.close();
-  await limited.locator('#logout').click();
-  await jailed.page.getByText('Терминал закрыт', {exact:true}).waitFor();
+  const signOutTab = await limited.context().newPage();
+  await signOutTab.goto(origin);
+  await accountAction(signOutTab, '#logout');
+  await jailed.page.locator('#login, .terminal-state[data-state=closed]').first().waitFor();
+  await signOutTab.close();
   docker('exec', runId, 'touch', tmp + '/release', '/tmp/release');
   await exists('/tmp/direct-job');
   await sleep(350);

@@ -14,7 +14,7 @@ import { attachEvents } from './events.ts';
 import { Controller } from './controller.ts';
 import { createAuth } from './auth.ts';
 import { attachTerminals } from './terminal.ts';
-import { serveWeb } from './web-static.ts';
+import { isWebPage, serveWeb } from './web-static.ts';
 
 async function body(req: IncomingMessage) {
   const buffers: Buffer[] = [];
@@ -104,10 +104,12 @@ export function createService({ db, origin, webRoot = process.env.PAPPAI_WEB_ROO
     }
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader(
-      'Content-Security-Policy',
-      "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
-    );
+    // The embedded terminal creates style elements in whichever page opened the workspace.
+    const terminalStyles = req.method === 'GET' && isWebPage(path) ? "; style-src 'self' 'unsafe-inline'" : '';
+    const formAction = path === '/terminal' ? "'none'" : "'self'";
+    res.setHeader('Content-Security-Policy',
+      "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action " +
+      formAction + terminalStyles);
 
     let id = null;
     try {
@@ -122,10 +124,7 @@ export function createService({ db, origin, webRoot = process.env.PAPPAI_WEB_ROO
         await serveUserFiles(store,actor,req,res);
         return;
       }
-      if (path === '/terminal') {
-        if (!auth.user(req, false)) { res.writeHead(303, {Location: '/'}).end(); return; }
-        res.setHeader('Content-Security-Policy', "default-src 'self'; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'");
-      }
+      if (path === '/terminal' && !auth.user(req, false)) { res.writeHead(303, {Location: '/'}).end(); return; }
       if (path !== '/api' && !path.startsWith('/api/') && req.method === 'GET' && await serveWeb(path, res, webRoot)) return;
       res.setHeader('Content-Type', 'application/json; charset=utf-8');
       if (apiPath === '/session' && req.method === 'GET') {

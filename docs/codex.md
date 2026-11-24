@@ -5,11 +5,11 @@ Install the [runner package and CLI distribution](https://github.com/flinbein/pa
 ## From the web panel
 
 1. Open **Раннеры** (Runners). If `codex` is already available, continue to the tree. Otherwise choose **Добавить раннер**, check the installed entrypoint and native CLI paths, and register it. Registration starts the installed runner.
-2. Select the workspace in the tree. Choose **Создать ноду**, select **TEAM**, and give it a name. The panel selects the new team. Create a **PROFILE** inside it.
-3. In the profile, enter the server-side path of your prepared Codex `auth.json` and choose **Импортировать авторизацию Codex**. The path is resolved using your signed-in user's filesystem permissions.
-4. Select the TEAM again and create **APP · Codex**. Choose the PROFILE you created. This template declares a persistent agent with message, history and interrupt methods. The permissions editor defaults to `[]`; model authentication is sufficient for a simple conversation. Grant workspace permissions separately when the agent needs tools.
-5. Return to the PROFILE. Choose the new APP in the scope dropdown, save the scope, then enable the profile. The dropdown appends the selected ID to the rules shown in the editor.
-6. Select the APP, choose **Запустить**, then enter a message and choose **Отправить сообщение**. The reply appears below the composer. To read earlier messages, open **Методы и справка**, choose `agent.getHistory`, and call it with `{}`.
+2. Select the workspace in the tree. Choose **Создать TEAM** and give the team a name. The panel selects the new team. Choose **Создать PROFILE** inside it.
+3. On the PROFILE, open **Настройка профиля**, enter the server-side path of your prepared Codex `auth.json` and choose **Импортировать авторизацию Codex**. The controller resolves the path using your signed-in user's filesystem permissions.
+4. Select the TEAM again and create **APP · Codex**. Choose the PROFILE you created. This template declares a persistent agent with message, history and interrupt methods. The permissions editor defaults to `[]`. Grant workspace permissions separately when the agent needs tools.
+5. Return to the PROFILE and open its settings. Choose the new APP in the scope dropdown, save the scope, then enable the profile. The dropdown appends the selected ID to the rules shown in the editor.
+6. Select the APP. Under **Управление APP**, choose **Запустить**. Open **Сообщение агенту** to send a message and read the reply. To read earlier messages, select `agent.getHistory` under **Методы и справка** and call it with `{}`.
 
 ## Equivalent method calls
 

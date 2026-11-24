@@ -25,39 +25,42 @@ export async function exerciseCodexPanel(page, exec, detached) {
   const click = id => page.locator('#'+id).click();
   const fill = (id,value) => page.locator('#'+id).fill(value);
   const chooseNode = name => page.locator('#nodes').getByRole('button',{name,exact:true}).click();
+  await page.locator('.account-menu summary').click();
   await click('nav-runners'); await click('new-runner');
   await fill('entrypoint','/installed/node_modules/@flinbein/pappai-runner-codex/src/index.mjs');
   await fill('runner-config',JSON.stringify({profilesDir:'/run/pappai/private/profiles',stateDir:'/run/pappai/private/state',
     codexExecutablePath:'/code-dist/bin/codex',modelBaseUrl:'http://127.0.0.1:19871/v1'}));
   await page.getByRole('button',{name:'Зарегистрировать',exact:true}).click();
   await page.locator('#runner-list').getByText('codex',{exact:true}).waitFor();
-  await click('nav-node');
+  await page.locator('[data-node="~"]').click();
   async function create(type,name, profile) {
-    await click('new-node');
-    await page.locator('#create-type').selectOption(type); await fill('create-name',name);
+    await page.locator('[data-action="create/'+type+'"]').click();
+    await fill('create-name',name);
     if (profile) await page.locator('#create-profile').selectOption(profile);
-    await page.locator('#create-dialog').getByRole('button',{name:'Создать',exact:true}).click();
+    await page.locator('#create-node').getByRole('button',{name:'Создать',exact:true}).click();
     await page.waitForFunction(n => document.querySelector('#node-name').textContent === n,name);
     return page.locator('#node-id').textContent();
   }
   await create('team','Panel team');
   const profile = await create('profile','Panel profile');
+  await click('show-profile');
   await fill('auth-file','/tmp/panel-auth.json');
   await page.locator('#profile-import button').click();
   await page.getByText('Авторизация импортирована.',{exact:true}).waitFor();
   await chooseNode('Panel team');
   const app = await create('codex','Panel agent',profile);
   await chooseNode('Panel profile');
+  await click('show-profile');
   await page.locator('#scope-app').selectOption(app);
   await page.locator('#profile-scope button').click();
   await page.getByText('Область доступа сохранена.',{exact:true}).waitFor();
   await click('enable-profile');
   await page.locator('#node-status').getByText('Работает',{exact:true}).waitFor();
-  await chooseNode('Panel agent'); await click('app-start');
+  await chooseNode('Panel agent'); await click('show-management'); await click('app-start');
   await page.locator('#app-status').getByText('Работает',{exact:true}).waitFor();
-  await fill('message','panel greeting'); await page.locator('#send-message button').click();
+  await click('show-chat'); await fill('message','panel greeting'); await page.locator('#send-message button').click();
   await page.waitForFunction(() => document.querySelector('#reply').textContent === 'panel reply',null,{timeout:45000});
-  await click('show-help'); await page.locator('#feature').selectOption('agent.execute');
+  await page.locator('[data-action="methods/agent.execute"]').click();
   await page.locator('#schema-block summary').click();
   assert.match(await page.locator('#feature-schema').textContent(),/minLength/);
   await fill('arguments','{invalid');
@@ -71,7 +74,7 @@ export async function exerciseCodexPanel(page, exec, detached) {
   await page.setViewportSize({width:375,height:750});
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
   await page.setViewportSize({width:1280,height:800});
-  await click('show-actions');
+  await click('show-chat');
   if (process.env.PAPPAI_BROWSER_SCREENSHOT) await page.screenshot({path:process.env.PAPPAI_BROWSER_SCREENSHOT});
   console.log('PASS: browser runner registration, TEAM, PROFILE import and scope, persistent Codex APP, message and history');
 }

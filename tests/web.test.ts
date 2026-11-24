@@ -38,6 +38,13 @@ async function startWeb(t: TestContext, webRoot = '') {
   return {send,db,store:s.store,port,origin};
 }
 
+function signIn(db: DatabaseSync, actor: string) {
+  const hash = createHash('sha256').update('test-session').digest('hex');
+  db.prepare('INSERT INTO passkeys VALUES(?,?,?,?)').run('key', actor, Buffer.alloc(4), 0);
+  db.prepare('INSERT INTO web_sessions VALUES(?,?,?,?)').run(hash, 'key', Date.now()+60000, Date.now()+60000);
+  return {Cookie: 'pappai-local-session=test-session'};
+}
+
 test('bundled panel and assets are public; terminal and RPC retain their access checks', async t => {
   const {send} = await startWeb(t);
   const panel = await send('/');
@@ -52,9 +59,22 @@ test('bundled panel and assets are public; terminal and RPC retain their access 
   assert.match(asset.headers['content-type']!, /javascript/);
   assert.match(asset.headers['cache-control']!, /immutable/);
   assert.equal(asset.headers['x-content-type-options'], 'nosniff');
-  const terminal = await send('/terminal');
-  assert.equal(terminal.status, 303);
-  assert.equal(terminal.headers.location, '/');
+  for (const path of ['/terminal', '/terminal?sandbox=1']) {
+    const terminal = await send(path);
+    assert.equal(terminal.status, 303);
+    assert.equal(terminal.headers.location, '/');
+  }
+  for (const path of ['/nodes/~', '/nodes/abc/methods/%24.app.start', '/nodes/abc/create/team',
+    '/nodes/abc/chat', '/runners', '/rpc']) {
+    const page = await send(path);
+    assert.equal(page.status, 200, path);
+    assert.equal(page.body, panel.body);
+    assert.match(page.headers['content-security-policy']!, /style-src 'self' 'unsafe-inline'/);
+  }
+  for (const path of ['/nodes', '/nodes/', '/nodes//methods/name', '/runners/unknown', '/api/rpc', '/unknown']) {
+    assert.equal((await send(path)).status, 404, path);
+  }
+  assert.equal((await send('/nodes/abc', 'POST')).status, 404);
   for (const path of ['/rpc','/api/rpc']) {
     assert.equal((await send(path, 'POST')).status, 401);
     assert.equal((await send(path, 'POST', { Origin: 'https://other.example' })).status, 403);
@@ -72,10 +92,7 @@ test('bundled panel and assets are public; terminal and RPC retain their access 
 test('HTTP and both WebSockets share the same USER session and canonical logout revokes it',async t=>{
   const {send,db,store,port,origin}=await startWeb(t);
   const actor=store.ensureAdmin('api@example.test').id;
-  const hash=createHash('sha256').update('test-session').digest('hex');
-  db.prepare('INSERT INTO passkeys VALUES(?,?,?,?)').run('key',actor,Buffer.alloc(4),0);
-  db.prepare('INSERT INTO web_sessions VALUES(?,?,?,?)').run(hash,'key',Date.now()+60000,Date.now()+60000);
-  const headers={Cookie:'pappai-local-session=test-session'};
+  const headers=signIn(db, actor);
   for (const prefix of ['', '/api']) {
     const session=await send(prefix+'/session','GET',headers);
     assert.deepEqual(JSON.parse(session.body),{user:actor,canChooseSandbox:true,canManageApps:true});
@@ -100,22 +117,29 @@ test('HTTP and both WebSockets share the same USER session and canonical logout 
 test('switching current changes the entry while retained assets keep their original bytes', async t => {
   const root = await mkdtemp(join(tmpdir(), 'pappai-web-'));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const {send} = await startWeb(t, root);
+  const {send, db, store} = await startWeb(t, root);
+  const headers = signIn(db, store.ensureAdmin('panel@example.test').id);
   const bundled = await send('/');
   assert.equal(bundled.status, 200);
 
-  async function activate(version: string) {
+  async function activate(version: string, terminalEntry: string) {
     const dir = join(root, 'releases', version);
     await mkdir(join(dir, 'assets'), { recursive: true });
     await writeFile(join(dir, 'index.html'), `<script src="/_web/${version}/assets/panel.js"></script>`);
+    await writeFile(join(dir, 'terminal.html'), terminalEntry);
     await writeFile(join(dir, 'assets', 'panel.js'), JSON.stringify(version));
     await writeFile(join(root, 'next'), version + '\n');
     await rename(join(root, 'next'), join(root, 'current'));
   }
-  await activate('3.0.0');
+  await activate('3.0.0', 'legacy standalone terminal');
   assert.match((await send('/')).body, /\/_web\/3\.0\.0\//);
-  await activate('3.1.0');
+  assert.equal((await send('/terminal', 'GET', headers)).body, 'legacy standalone terminal');
+  await activate('3.1.0', '<script src="/_web/3.1.0/assets/panel.js"></script>');
   assert.match((await send('/')).body, /\/_web\/3\.1\.0\//);
+  const terminal = await send('/terminal?sandbox=1', 'GET', headers);
+  assert.equal(terminal.status, 200);
+  assert.equal(terminal.body, (await send('/nodes/~/create/app')).body);
+  assert.match(terminal.headers['content-security-policy']!, /style-src 'self' 'unsafe-inline'/);
   for (const version of ['3.0.0', '3.1.0']) {
     const asset = await send(`/_web/${version}/assets/panel.js`);
     assert.equal(asset.status, 200);

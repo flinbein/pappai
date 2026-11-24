@@ -26,11 +26,16 @@ async function readOptional(path: string) {
   }
 }
 
+export function isWebPage(path: string) {
+  return path === '/' || path === '/terminal' || path === '/rpc' || path === '/runners' ||
+    /^\/nodes\/[^/]+(?:\/[^/]+)*$/.test(path);
+}
+
 export async function serveWeb(path: string, res: ServerResponse, releaseRoot?: string) {
-  const entry = path === '/' ? 'index.html' : path === '/terminal' ? 'terminal.html' : undefined;
-  if (!entry && !path.startsWith('/_web/')) return false;
+  const page = isWebPage(path);
+  if (!page && !path.startsWith('/_web/')) return false;
   try {
-    if (entry) {
+    if (page) {
       let dist = bundledDist;
       if (releaseRoot) {
         const pointer = await readOptional(join(releaseRoot, 'current'));
@@ -40,7 +45,8 @@ export async function serveWeb(path: string, res: ServerResponse, releaseRoot?: 
           dist = join(releaseRoot, 'releases', version);
         }
       }
-      const html = await readFile(join(dist, entry));
+      // Older releases ship a standalone terminal under this entry name.
+      const html = await readFile(join(dist, path === '/terminal' ? 'terminal.html' : 'index.html'));
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(html);
       return true;
     }
