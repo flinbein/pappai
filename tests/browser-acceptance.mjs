@@ -372,6 +372,7 @@ try {
   const optional = await terminal(admin, true, true);
   await optional.command("printf 'closed%s\\n' scrollback; exit");
   await admin.locator('.terminal-state[data-state=closed]').waitFor();
+  await admin.locator('.xterm-cursor').waitFor({state:'detached'});
   await admin.locator('[data-node="~"]').click();
   assert.equal(await admin.locator('#nav-terminal .online-dot').count(), 0);
   await admin.locator('#nav-terminal').click();
@@ -380,6 +381,7 @@ try {
   assert.ok(await admin.locator('#ctrl').isDisabled());
   await admin.getByRole('button', {name:'New terminal'}).click();
   await admin.locator('.terminal-state[data-state=online]').filter({hasText:'В песочнице'}).waitFor();
+  await admin.locator('.xterm-cursor').waitFor({state:'attached'});
   await admin.getByRole('button', {name:'Close terminal'}).click();
   await admin.locator('.terminal-state[data-state=closed]').waitFor();
   // Record results on the test container filesystem via the interactive PTY.
@@ -387,10 +389,14 @@ try {
   await jailed.page.setViewportSize({width:375,height:640});
   const termPage = jailed.page;
   assert.ok(await termPage.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
-  if (await termPage.locator('.terminal-toolbar').isHidden()) {
-    await touchStroke(termPage, '#screen', 0, 0, 2);
-    await termPage.locator('.terminal-toolbar').waitFor();
-  }
+  assert.ok(await termPage.locator('.terminal-toolbar').isHidden());
+  await termPage.locator('.xterm-helper-textarea').focus();
+  await termPage.keyboard.press('Shift');
+  await termPage.keyboard.press('Shift');
+  await termPage.locator('.terminal-toolbar').waitFor();
+  await touchStroke(termPage, '#screen', 0, 0, 2);
+  assert.ok(await termPage.locator('.terminal-toolbar').isHidden());
+  await touchStroke(termPage, '#screen', 0, 0, 2);
   await jailed.command('stty size >/tmp/font-before');
   await exists(tmp+'/font-before');
   await termPage.locator('#terminal-tools').tap();
@@ -414,12 +420,19 @@ try {
     await termPage.waitForFunction(() => document.fullscreenElement?.matches('.terminal-view'));
     assert.equal(await termPage.locator(':fullscreen .terminal-statusbar').count(), 0);
     assert.equal(await termPage.locator(':fullscreen #screen').evaluate(e => e.getBoundingClientRect().top), 0);
+    await termPage.evaluate(() => {
+      Object.defineProperty(visualViewport, 'height', {configurable:true, get:() => innerHeight - 220});
+      visualViewport.dispatchEvent(new Event('resize'));
+    });
+    assert.ok(await termPage.locator('.terminal-toolbar').evaluate(e =>
+      Math.abs(e.getBoundingClientRect().bottom - visualViewport.height) <= 1));
+    await termPage.evaluate(() => { delete visualViewport.height; visualViewport.dispatchEvent(new Event('resize')); });
     await termPage.locator('#fullscreen').click();
     await termPage.waitForFunction(() => !document.fullscreenElement);
   }
   await termPage.locator('#terminal-input').tap();
-  const expected = 'Q\x1b[Z\x03\x1bx\x1b\t\x1b[D\x1b[B\x1b[A\x1b[C\x1b[H\x1b[F\x1b[5~\x1b[6~/|-first\rsecond';
-  await jailed.command(`python3 -c 'import sys,tty,termios; t=termios.tcgetattr(0); tty.setraw(0); print("\\033[?2004l",end="",flush=True); open("/tmp/input-ready","w").write("1"); b=sys.stdin.buffer.read(${expected.length}); termios.tcsetattr(0,termios.TCSANOW,t); open("/tmp/key-bytes","w").write(b.hex())'`);
+  const expected = 'Q\x1b[Z\x1b[1;2A\x03\x1b[1;3D\x1b[1;3D\x1bx\x1b\t\x1b[D\x1b[B\x1b[A\x1b[C\x1b[H\x1b[F\x1b[5~\x1b[6~/|-first\rsecond';
+  await jailed.command(`python3 -c 'import sys,tty,termios; t=termios.tcgetattr(0); tty.setraw(0); print("\\033[?2004l",end="",flush=True); open("/tmp/input-ready","w").write("1"); b=b"".join(iter(lambda:sys.stdin.buffer.read(1),bytes([4]))); termios.tcsetattr(0,termios.TCSANOW,t); open("/tmp/key-bytes","w").write(b.hex())'`);
   await exists(tmp+'/input-ready');
   await touchStroke(termPage, '#shift', 0, 0, 1, 650);
   assert.equal(await termPage.locator('#shift').getAttribute('aria-pressed'), 'false');
@@ -427,15 +440,26 @@ try {
   await termPage.keyboard.insertText('q');
   await termPage.locator('#shift').tap();
   await termPage.locator('#tab').tap();
+  assert.equal(await termPage.locator('#shift').getAttribute('aria-pressed'),'true');
+  await touchStroke(termPage, '#arrow-pad', 0, -20);
   await termPage.locator('#ctrl').tap();
-  assert.equal(await termPage.locator('#ctrl').getAttribute('aria-pressed'),'true');
+  await termPage.locator('#ctrl[aria-pressed=true]').waitFor();
   await termPage.keyboard.insertText('c');
   assert.equal(await termPage.locator('#ctrl').getAttribute('aria-pressed'),'false');
   await termPage.locator('#alt').click();
+  await touchStroke(termPage, '#arrow-pad', -20, 0);
+  await touchStroke(termPage, '#arrow-pad', -20, 0);
+  assert.equal(await termPage.locator('#alt').getAttribute('aria-pressed'),'true');
   await termPage.keyboard.insertText('x');
   await termPage.locator('[data-key=Escape]').tap();
   await termPage.locator('#tab').tap();
-  for (const [dx,dy] of [[-20,0],[0,20],[0,-20],[20,0]]) await touchStroke(termPage, '#arrow-pad', dx, dy);
+  await termPage.locator('#arrow-pad').tap();
+  const arrowHint = await termPage.locator('.terminal-hint').textContent();
+  assert.match(arrowHint, /Drag/);
+  await touchStroke(termPage, '#arrow-pad', 0, 0, 1, 650);
+  assert.equal(await termPage.locator('.terminal-hint').textContent(), arrowHint);
+  await touchStroke(termPage, '#arrow-pad', -20, 0, 1, 650);
+  for (const [dx,dy] of [[0,20],[0,-20],[20,0]]) await touchStroke(termPage, '#arrow-pad', dx, dy);
   for (const key of ['Home','End','PageUp','PageDown']) await termPage.keyboard.press(key);
   await termPage.keyboard.insertText('/|-');
   assert.ok(await termPage.locator('.xterm-helper-textarea').evaluate(e=>e===document.activeElement));
@@ -444,6 +468,8 @@ try {
   await termPage.evaluate(() => Object.defineProperty(navigator.clipboard,'readText',{configurable:true,value:async()=>{throw Error('denied');}}));
   await termPage.locator('#paste').tap();
   await termPage.locator('#paste-input').fill('first\nsecond');
+  await termPage.locator('.xterm-helper-textarea').focus();
+  await termPage.keyboard.press('Control+d');
   await exists(tmp+'/key-bytes');
   assert.equal(docker('exec',runId,'cat',tmp+'/key-bytes'),Buffer.from(expected).toString('hex'));
   await termPage.evaluate(() => delete navigator.clipboard.readText);
