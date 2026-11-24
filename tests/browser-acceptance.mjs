@@ -334,15 +334,26 @@ try {
   await management.getByText('Работает',{exact:true}).waitFor();
   assert.equal(await rpc(admin,'call',{node:app,method:'message.extractText',version:'2',data:{text:' v2 '}}),'v2');
   const directTab = await admin.context().newPage();
+  await directTab.addInitScript(() => {
+    const request = navigator.wakeLock.request.bind(navigator.wakeLock);
+    navigator.wakeLock.request = async type => {
+      const lock = await request(type);
+      window.testScreenLock = lock;
+      return lock;
+    };
+  });
   const sockets = [];
   directTab.on('websocket', ws => { if (ws.url().includes('/api/ws/terminal')) sockets.push(ws); });
   await directTab.goto(origin);
   const direct = await terminal(directTab, false);
+  await directTab.waitForFunction(() => window.testScreenLock?.released === false);
   await direct.command('export PANEL_TEST=still_here');
   await direct.page.locator('[data-node="~"]').click();
   await direct.page.locator('#nav-terminal .online-dot').waitFor();
   assert.equal(await direct.page.locator('.terminal-view').isVisible(), false);
+  await directTab.waitForFunction(() => window.testScreenLock?.released === true);
   await direct.page.locator('#nav-terminal').click();
+  await directTab.waitForFunction(() => window.testScreenLock?.released === false);
   await direct.command('echo "$PANEL_TEST" >/tmp/pane-return');
   await exists('/tmp/pane-return');
   assert.equal(docker('exec', runId, 'cat', '/tmp/pane-return'), 'still_here');
@@ -439,6 +450,9 @@ try {
   const expected = 'Q\x1b[Z\x1b[1;2A\x03\x1b[1;3D\x1b[1;3D\x1bx\x1b\t\x1b[D\x1b[B\x1b[A\x1b[C\x1b[H\x1b[F\x1b[5~\x1b[6~/|-first\rsecond';
   await jailed.command(`python3 -c 'import sys,tty,termios; t=termios.tcgetattr(0); tty.setraw(0); print("\\033[?2004l",end="",flush=True); open("/tmp/input-ready","w").write("1"); b=b"".join(iter(lambda:sys.stdin.buffer.read(1),bytes([4]))); termios.tcsetattr(0,termios.TCSANOW,t); open("/tmp/key-bytes","w").write(b.hex())'`);
   await exists(tmp+'/input-ready');
+  for (const [dx,dy] of [[0,-20],[0,20],[-20,0],[20,0]]) await touchStroke(termPage, '#nav-pad', dx, dy);
+  await termPage.getByRole('button', {name:'Ins',exact:true}).tap();
+  await termPage.getByRole('button', {name:'Del',exact:true}).tap();
   const fn = termPage.getByRole('button', {name:'Fn', exact:true});
   const functions = termPage.getByRole('group', {name:'Function keys'});
   await fn.tap();
@@ -491,7 +505,8 @@ try {
   await termPage.keyboard.press('Control+d');
   await exists(tmp+'/key-bytes');
   const fnBytes = '\x1bOP\x1bOQ\x1bOR\x1bOS\x1b[15~\x1b[17~\x1b[18~\x1b[19~\x1b[20~\x1b[21~\x1b[23~\x1b[24~\x1b[15;2~';
-  assert.equal(docker('exec',runId,'cat',tmp+'/key-bytes'),Buffer.from(fnBytes + expected).toString('hex'));
+  const navigationBytes = '\x1b[5~\x1b[6~\x1b[H\x1b[F\x1b[2~\x1b[3~';
+  assert.equal(docker('exec',runId,'cat',tmp+'/key-bytes'),Buffer.from(navigationBytes + fnBytes + expected).toString('hex'));
   await termPage.evaluate(() => delete navigator.clipboard.readText);
   await termPage.context().grantPermissions(['clipboard-read','clipboard-write'],{origin});
   await termPage.bringToFront();

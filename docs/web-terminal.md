@@ -6,7 +6,11 @@ The toolbar starts hidden. With the terminal focused, tap and release Shift twic
 
 The input row has Esc, Tab, arrows, Ctrl, Alt and Shift. A selected modifier stays active across toolbar presses. Tap it again to release it, or type on your keyboard to use it once and release it. For example, select Alt and swipe left twice for two Alt+Left presses. Select Shift to send Shift+arrow or reverse Tab. Tap or hold the arrow pad for instructions. Drag in the desired direction to send an arrow and keep holding after the drag to repeat.
 
-Tap **Fn** after Shift to show F1–F12. Swipe horizontally to reach the later keys on a narrow screen. Tap a function key to send it with the selected modifiers and return to the input row. Tap **↩** on the right to return without sending a key.
+After Shift, the input row has **Nav**, **Fn**, **Ins** and **Del**. On Nav, swipe up for Page Up, down for Page Down, left for Home or right for End. Hold after a vertical swipe to repeat. Ins sends Insert and Del deletes forward in programs that support it. These keys honor the selected modifiers.
+
+Tap **Fn** to show F1–F12. Swipe horizontally to reach the later keys on a narrow screen. Tap a function key to send it with the selected modifiers and return to the input row. Tap **↩** on the right to return without sending a key.
+
+A visible, connected terminal requests a screen wake lock in both ordinary and fullscreen views. The request is released when you hide or close the terminal and renewed when you return to a connected terminal. This requires a secure context and a browser that supports screen wake locks. Device power-saving settings can override the request.
 
 Tap ☰ to switch to Copy, Paste, A+, A− and fullscreen. Tap ⌨ on the right to return to input keys. Hold a button to read its hint. Releasing after a hold performs no button action. Copy and Paste also support the desktop shortcuts Ctrl+Shift+C and Ctrl+Shift+V.
 
