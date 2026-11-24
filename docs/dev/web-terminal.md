@@ -4,6 +4,8 @@ The workspace loads local copies of xterm.js and FitAddon for its terminal pane.
 
 The mobile page uses the browser's visual viewport for keyboard layout. In fullscreen, subtract only the portion of the terminal box below the visible bottom edge. This also handles a browser that already resized the entire layout for the keyboard.
 
+On touch devices the fullscreen terminal anchors xterm's invisible input inside the visible area. Following the terminal cursor to the top edge can make Android Chrome pan the entire surface when the keyboard opens, even when the DOM reports the correct toolbar bounds. To verify a layout change on a phone, open fullscreen and the keyboard in both orders, then hide and reopen the keyboard. Compare the painted toolbar edge with the keyboard edge.
+
 During the `/api/ws/terminal` upgrade, the controller checks the Host, Origin, active session cookie and USER status. The `sandbox=1` parameter can only tighten isolation. The controller verifies that incoming data belongs to an active session. Logging out closes that session's connections. A heartbeat checks session expiry and detects lost connections.
 
 Binary messages carry PTY bytes in both directions. Client text messages set the terminal size or acknowledge the number of bytes xterm.js has rendered. The controller can pause PTY reads while waiting for acknowledgement. Server JSON messages report the mode or an error. The server keeps no terminal history.

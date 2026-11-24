@@ -426,6 +426,11 @@ try {
     });
     assert.ok(await termPage.locator('.terminal-toolbar').evaluate(e =>
       Math.abs(e.getBoundingClientRect().bottom - visualViewport.height) <= 1));
+    assert.ok(await termPage.locator('.xterm-helper-textarea').evaluate(e => {
+      const input = e.getBoundingClientRect();
+      const screen = document.querySelector('#screen').getBoundingClientRect();
+      return getComputedStyle(e).position === 'fixed' && input.top > screen.top && input.bottom < screen.bottom;
+    }), 'Fullscreen touch input stays inside the visible terminal while the keyboard is open');
     await termPage.evaluate(() => { delete visualViewport.height; visualViewport.dispatchEvent(new Event('resize')); });
     await termPage.locator('#fullscreen').click();
     await termPage.waitForFunction(() => !document.fullscreenElement);
