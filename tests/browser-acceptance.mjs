@@ -439,6 +439,20 @@ try {
   const expected = 'Q\x1b[Z\x1b[1;2A\x03\x1b[1;3D\x1b[1;3D\x1bx\x1b\t\x1b[D\x1b[B\x1b[A\x1b[C\x1b[H\x1b[F\x1b[5~\x1b[6~/|-first\rsecond';
   await jailed.command(`python3 -c 'import sys,tty,termios; t=termios.tcgetattr(0); tty.setraw(0); print("\\033[?2004l",end="",flush=True); open("/tmp/input-ready","w").write("1"); b=b"".join(iter(lambda:sys.stdin.buffer.read(1),bytes([4]))); termios.tcsetattr(0,termios.TCSANOW,t); open("/tmp/key-bytes","w").write(b.hex())'`);
   await exists(tmp+'/input-ready');
+  const fn = termPage.getByRole('button', {name:'Fn', exact:true});
+  const functions = termPage.getByRole('group', {name:'Function keys'});
+  await fn.tap();
+  await functions.getByRole('button', {name:'Back to input keys'}).tap();
+  for (let n = 1; n <= 12; n++) {
+    await fn.tap();
+    await functions.getByRole('button', {name:'F' + n, exact:true}).tap();
+    assert.ok(await fn.isVisible());
+  }
+  await termPage.locator('#shift').tap();
+  await fn.tap();
+  await functions.getByRole('button', {name:'F5', exact:true}).tap();
+  assert.equal(await termPage.locator('#shift').getAttribute('aria-pressed'), 'true');
+  await termPage.locator('#shift').tap();
   await touchStroke(termPage, '#shift', 0, 0, 1, 650);
   assert.equal(await termPage.locator('#shift').getAttribute('aria-pressed'), 'false');
   await termPage.locator('#shift').tap();
@@ -476,7 +490,8 @@ try {
   await termPage.locator('.xterm-helper-textarea').focus();
   await termPage.keyboard.press('Control+d');
   await exists(tmp+'/key-bytes');
-  assert.equal(docker('exec',runId,'cat',tmp+'/key-bytes'),Buffer.from(expected).toString('hex'));
+  const fnBytes = '\x1bOP\x1bOQ\x1bOR\x1bOS\x1b[15~\x1b[17~\x1b[18~\x1b[19~\x1b[20~\x1b[21~\x1b[23~\x1b[24~\x1b[15;2~';
+  assert.equal(docker('exec',runId,'cat',tmp+'/key-bytes'),Buffer.from(fnBytes + expected).toString('hex'));
   await termPage.evaluate(() => delete navigator.clipboard.readText);
   await termPage.context().grantPermissions(['clipboard-read','clipboard-write'],{origin});
   await termPage.bringToFront();
