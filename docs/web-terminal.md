@@ -2,7 +2,7 @@
 
 Sign in and open the terminal from the sidebar or visit `/terminal`. Each workspace tab can run one interactive `/bin/sh` inside the Linux container. Move to another node or panel action and return to the terminal to continue with the same shell. Opening the terminal in another browser tab gives that tab its own shell. The terminal follows the pane size and supports arrow keys, Ctrl+C and interactive console programs.
 
-The toolbar starts hidden. With the terminal focused, tap and release Shift twice to show or hide it. On a phone, tap with two fingers for the same action. Tap the screen to open the keyboard, swipe to scroll, or pinch to resize the text. Hold a word to select it and drag the handles to adjust the selection.
+The toolbar starts hidden. With the terminal focused, tap and release Shift twice to show or hide it. On a phone, tap with two fingers for the same action. Tap the screen to open the keyboard. In a terminal program that enables mouse input, a short tap also sends a left click at the touched cell. Swipe to scroll, pinch to resize the text, or hold a word to select it and drag the handles to adjust the selection.
 
 The input row has Esc, Tab, arrows, Ctrl, Alt and Shift. A selected modifier stays active across toolbar presses. Tap it again to release it, or type on your keyboard to use it once and release it. For example, select Alt and swipe left twice for two Alt+Left presses. Select Shift to send Shift+arrow or reverse Tab. Tap or hold the arrow pad for instructions. Drag in the desired direction to send an arrow and keep holding after the drag to repeat.
 

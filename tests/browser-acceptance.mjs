@@ -462,6 +462,21 @@ try {
     await termPage.waitForFunction(() => !document.fullscreenElement);
   }
   await termPage.locator('#terminal-input').tap();
+  // Record both input devices in the same SGR mouse-reporting PTY.
+  await jailed.command("python3 -c 'import sys, tty, termios; saved=termios.tcgetattr(0); tty.setraw(0); print(\"\\033[?1000h\\033[?1006h\", end=\"\", flush=True); data=b\"\".join(iter(lambda:sys.stdin.buffer.read(1),bytes([4]))); print(\"\\033[?1000l\\033[?1006l\", end=\"\", flush=True); termios.tcsetattr(0,termios.TCSANOW,saved); open(\"/tmp/mouse-input\",\"wb\").write(data)'");
+  await termPage.locator('.xterm.enable-mouse-events').waitFor();
+  const mouseGrid = await termPage.locator('.xterm-screen').boundingBox();
+  const mouseX = Math.floor(mouseGrid.x + mouseGrid.width / 2);
+  const mouseY = Math.floor(mouseGrid.y + mouseGrid.height / 2);
+  await termPage.mouse.click(mouseX, mouseY);
+  await termPage.touchscreen.tap(mouseX, mouseY);
+  await touchStroke(termPage, '.xterm-screen', 0, -50);
+  await touchStroke(termPage, '.xterm-screen', 0, 0, 1, 600);
+  await termPage.keyboard.press('Control+d');
+  await exists(tmp+'/mouse-input');
+  const reports = docker('exec',runId,'cat',tmp+'/mouse-input');
+  // Exactly one press/release per click, identical coordinates, then only wheel reports.
+  assert.match(reports, /^(\x1b\[<0;(\d+;\d+)M\x1b\[<0;\2m)\1(?:\x1b\[<65;\d+;\d+M)+$/);
   const expected = 'Q\x1b[Z\x1b[1;2A\x03\x1b[1;3D\x1b[1;3D\x1bx\x1b\t\x1b[D\x1b[B\x1b[A\x1b[C\x1b[H\x1b[F\x1b[5~\x1b[6~/|-first\rsecond';
   await jailed.command(`python3 -c 'import sys,tty,termios; t=termios.tcgetattr(0); tty.setraw(0); print("\\033[?2004l",end="",flush=True); open("/tmp/input-ready","w").write("1"); b=b"".join(iter(lambda:sys.stdin.buffer.read(1),bytes([4]))); termios.tcsetattr(0,termios.TCSANOW,t); open("/tmp/key-bytes","w").write(b.hex())'`);
   await exists(tmp+'/input-ready');
