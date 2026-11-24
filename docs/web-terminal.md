@@ -2,18 +2,19 @@
 
 Sign in and open **Terminal** from the sidebar or visit `/terminal`. The **+** tab shows a launch form. Press Enter or select the start button to run the command. The default is `/bin/sh -i`. To start a different installed program, enter its name and arguments, for example `node` or `node "/workspace/my script.js"`. The launcher understands quotes. For a shell pipeline, explicitly invoke a shell, for example `/bin/sh -c 'ls /tmp | sort'`.
 
-Use **+** again to open another terminal. Each terminal has its own process, input and scrollback. Switching tabs or visiting another workspace pane keeps the terminals running. The numbered tabs can display titles supplied by their programs. The dot shows the state:
+Use **+** again to open another terminal. Each terminal has its own process, input and scrollback. Switching tabs or visiting another workspace pane keeps the terminals running. The tab displays the program name or its current title. Hover over the dot to read its status.
 
 | Dot | Meaning |
 | --- | --- |
 | Yellow | The terminal is connecting or starting its program. |
 | Green | The program started. |
-| Gray | The session ended. The status distinguishes a program exit from a lost connection. |
-| Red | Startup failed. Select the tab to read the error. |
+| Gray | The program exited with code 0 or the connection ended without a reported exit code. |
+| Orange | The program exited with a nonzero code. Hover over the dot for the code. |
+| Red | Startup failed. The tab displays the startup error in place of the terminal. |
 
 When a program exits, its tab keeps the output for reading and copying. The **×** on a tab removes it and ends its connection. Other terminal tabs stay open. Reloading or closing the browser tab ends all its terminal connections. Signing out closes the terminals for that web session.
 
-The toolbar starts hidden. With the terminal focused, tap and release Shift twice to show or hide it. On a phone, tap with two fingers for the same action. Tap the screen to open the keyboard. In a terminal program that enables mouse input, a short tap also sends a left click at the touched cell. Swipe to scroll, pinch to resize the text, or hold a word to select it and drag the handles to adjust the selection.
+The toolbar starts hidden. With the terminal focused, tap and release Shift twice to open the clipboard, font and fullscreen controls. Tap the screen with two fingers to open the input keys. Repeat the same gesture on its open row to hide it. Tap the screen to open the keyboard. In a terminal program that enables mouse input, a short tap also sends a left click at the touched cell. Swipe to scroll, pinch to resize the text, or hold a word to select it and drag the handles to adjust the selection.
 
 The input row has Esc, Tab, arrows, Ctrl, Alt and Shift. A selected modifier stays active across toolbar presses. Tap it again to release it, or type on your keyboard to use it once and release it. For example, select Alt and swipe left twice for two Alt+Left presses. Select Shift to send Shift+arrow or reverse Tab. Tap or hold the arrow pad for instructions. Drag in the desired direction to send an arrow and keep holding after the drag to repeat.
 
@@ -27,7 +28,7 @@ Tap ☰ to switch to Copy, Paste, A+, A− and fullscreen. Tap ⌨ to return to 
 
 Copying with no selection opens a selectable text view that includes scrollback. If the browser denies clipboard access, the paste action opens a text field for the system paste menu. Pasted line breaks are sent to the terminal.
 
-The workspace displays the execution mode and session controls above the terminal. Fullscreen shows only the terminal and its optional toolbar. With a restricted permission chain, the terminal uses bubblewrap with the USER's effective file and network permissions. Its working directory and `HOME` are the user's private `/tmp`, shared between that user's sandboxes. With a fully trusted chain of `permissions: null`, the regular terminal starts in `/root` with the rights of the pappai process inside the container. The sandbox option for such users provides read-only base system directories, a writable private `/tmp` and no external network.
+Fullscreen shows only the terminal and its optional toolbar. With a restricted permission chain, the terminal uses bubblewrap with the USER's effective file and network permissions. Its working directory and `HOME` are the user's private `/tmp`, shared between that user's sandboxes. With a fully trusted chain of `permissions: null`, the regular terminal starts in `/root` with the rights of the pappai process inside the container. The sandbox option for such users provides read-only base system directories, a writable private `/tmp` and no external network.
 
 The program runs with the USER's effective permissions. A private executable or PROFILE login used by an APP runner remains subject to those permissions. In a sandbox, ending the session also terminates background processes. In an administrator's regular terminal, a detached job with redirected streams, such as `nohup command </dev/null >job.log 2>&1 &`, may continue running.
 

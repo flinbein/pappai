@@ -102,6 +102,7 @@ async function assertTerminalState(tab, state) {
   const [r, g, b] = channels.slice(1).map(Number);
   if (state === 'online') assert.ok(g > r && g > b, `Expected green, got ${color}`);
   if (state === 'failed') assert.ok(r > g && r > b, `Expected red, got ${color}`);
+  if (state === 'nonzero') assert.ok(r > g && g > b, `Expected orange, got ${color}`);
   if (state === 'closed') assert.ok(Math.max(r,g,b) - Math.min(r,g,b) < 32, `Expected gray, got ${color}`);
 }
 
@@ -148,8 +149,8 @@ async function terminal(page, {sandbox, canChooseSandbox}) {
   }
   const {tab, close} = await launchTerminal(page);
   await assertTerminalState(tab, 'online');
-  await page.locator('.terminal-state[data-state=online]').filter({
-    hasText:sandbox ? 'В песочнице' : 'Без песочницы'}).waitFor();
+  assert.equal(await tab.locator('.terminal-tab-dot').getAttribute('title'), 'working');
+  assert.equal(await page.locator('.terminal-statusbar').count(), 0);
   await page.waitForFunction(() => /[#$]\s*$/.test(document.querySelector('.xterm-rows')?.textContent ?? ''));
   async function command(line) {
     if (await tab.getAttribute('aria-selected') !== 'true') await tab.click();
@@ -413,6 +414,13 @@ try {
   assert.equal(sockets.length, 0, 'Opening the launch form must not start a PTY');
   const direct = await terminal(directTab, {sandbox:false, canChooseSandbox:true});
   assert.equal(await direct.tab.locator('.terminal-tab-title').textContent(), 'sh');
+  assert.equal(await direct.tab.textContent(), 'sh');
+  const group = await direct.tab.locator('..').boundingBox();
+  const plus = await directTab.locator('#new-terminal').boundingBox();
+  assert.ok(Math.abs(plus.x - group.x - group.width) < 2);
+  const closeBounds = await direct.close.boundingBox();
+  assert.equal(closeBounds.width, closeBounds.height);
+  assert.equal(await direct.close.evaluate(el => getComputedStyle(el).borderRadius), '50%');
   await directTab.waitForFunction(() => window.testScreenLock?.released === false);
   await direct.command('export PANEL_TEST=still_here');
   await direct.page.locator('[data-node="~"]').click();
@@ -475,6 +483,7 @@ try {
   const optional = await terminal(admin, {sandbox:true, canChooseSandbox:true});
   await optional.command("test ! -e /opt/pappai/src && printf 'closed%s\\n' scrollback; exit");
   await assertTerminalState(optional.tab, 'closed');
+  assert.equal(await optional.tab.locator('.terminal-tab-dot').getAttribute('title'), 'exit code 0');
   await admin.locator('.xterm-cursor').waitFor({state:'detached'});
   await admin.locator('[data-node="~"]').click();
   assert.equal(await admin.locator('#nav-terminal .online-dot').count(), 0);
@@ -484,10 +493,14 @@ try {
   assert.ok(await admin.locator('#ctrl').isDisabled());
   const completed = await launchTerminal(admin,
     `/bin/sh -c 'printf "[%s][%s][%s]\\n" "$1" "$2" "$3"; exit 7' args "two words" '' '$HOME'`);
-  await assertTerminalState(completed.tab, 'closed');
+  await assertTerminalState(completed.tab, 'nonzero');
+  assert.equal(await completed.tab.locator('.terminal-tab-dot').getAttribute('title'), 'exit code 7');
   await admin.locator('.terminal-frame:visible .xterm-rows').getByText('[two words][][$HOME]', {exact:true}).waitFor();
   const failed = await launchTerminal(admin, '/pappai-nonexistent-terminal-binary');
   await assertTerminalState(failed.tab, 'failed');
+  assert.equal(await failed.tab.locator('.terminal-tab-dot').getAttribute('title'), 'error');
+  await admin.locator('.terminal-frame:visible [role=alert]').filter({hasText:/No such file/}).waitFor();
+  assert.equal(await admin.locator('.terminal-frame:visible .xterm').count(), 0);
   await completed.tab.click();
   await admin.locator('.terminal-frame:visible .xterm-rows').getByText('[two words][][$HOME]', {exact:true}).waitFor();
   for (const session of [failed, completed, optional]) {
@@ -508,8 +521,9 @@ try {
   await termPage.keyboard.press('Shift');
   await termPage.keyboard.press('Shift');
   await termPage.locator('.terminal-toolbar').waitFor();
+  await termPage.locator('#copy').waitFor();
   await termPage.setViewportSize({width:240,height:640});
-  for (const id of ['terminal-tools', 'terminal-input']) {
+  for (const id of ['terminal-input', 'terminal-tools']) {
     const toggle = termPage.locator('#' + id);
     const before = await toggle.boundingBox();
     const keys = toggle.locator('..').locator('.terminal-keys');
@@ -523,6 +537,8 @@ try {
     await toggle.waitFor({state:'hidden'});
   }
   await termPage.setViewportSize({width:375,height:640});
+  await touchStroke(termPage, '#screen', 0, 0, 2);
+  await termPage.locator('#ctrl').waitFor();
   await touchStroke(termPage, '#screen', 0, 0, 2);
   assert.ok(await termPage.locator('.terminal-toolbar').isHidden());
   await touchStroke(termPage, '#screen', 0, 0, 2);
