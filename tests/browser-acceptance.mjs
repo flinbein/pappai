@@ -405,6 +405,21 @@ try {
   await termPage.keyboard.press('Shift');
   await termPage.keyboard.press('Shift');
   await termPage.locator('.terminal-toolbar').waitFor();
+  await termPage.setViewportSize({width:240,height:640});
+  for (const id of ['terminal-tools', 'terminal-input']) {
+    const toggle = termPage.locator('#' + id);
+    const before = await toggle.boundingBox();
+    const keys = toggle.locator('..').locator('.terminal-keys');
+    const first = keys.locator('button').first();
+    const start = await first.boundingBox();
+    await keys.evaluate(el => { el.scrollLeft = el.scrollWidth; });
+    assert.ok((await first.boundingBox()).x < start.x, 'The key row scrolls on a narrow screen');
+    assert.deepEqual(await toggle.boundingBox(), before, 'The switch stays in place');
+    assert.ok(before.x >= 0 && before.x + before.width <= 240);
+    await termPage.touchscreen.tap(before.x + before.width / 2, before.y + before.height / 2);
+    await toggle.waitFor({state:'hidden'});
+  }
+  await termPage.setViewportSize({width:375,height:640});
   await touchStroke(termPage, '#screen', 0, 0, 2);
   assert.ok(await termPage.locator('.terminal-toolbar').isHidden());
   await touchStroke(termPage, '#screen', 0, 0, 2);

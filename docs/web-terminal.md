@@ -12,7 +12,7 @@ Tap **Fn** to show F1–F12. Swipe horizontally to reach the later keys on a nar
 
 A visible, connected terminal requests a screen wake lock in both ordinary and fullscreen views. The request is released when you hide or close the terminal and renewed when you return to a connected terminal. This requires a secure context and a browser that supports screen wake locks. Device power-saving settings can override the request.
 
-Tap ☰ to switch to Copy, Paste, A+, A− and fullscreen. Tap ⌨ on the right to return to input keys. Hold a button to read its hint. Releasing after a hold performs no button action. Copy and Paste also support the desktop shortcuts Ctrl+Shift+C and Ctrl+Shift+V.
+Tap ☰ to switch to Copy, Paste, A+, A− and fullscreen. Tap ⌨ to return to the input keys. Both switches stay at the right edge while you scroll the other buttons. Hold a button to read its hint. Releasing after a hold performs no button action. Copy and Paste also support the desktop shortcuts Ctrl+Shift+C and Ctrl+Shift+V.
 
 Copying with no selection opens a selectable text view that includes scrollback. If the browser denies clipboard access, the paste action opens a text field for the system paste menu. Pasted line breaks are sent to the terminal.
 
