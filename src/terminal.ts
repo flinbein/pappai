@@ -5,6 +5,7 @@ import type { Readable } from 'node:stream';
 import { WebSocket, WebSocketServer } from 'ws';
 import type { Store } from './store.ts';
 import { sandboxArgs } from './sandbox.ts';
+import { isWebRpcSocket } from './events.ts';
 
 const bridge = readFileSync(new URL('./terminal-pty.py', import.meta.url), 'utf8');
 const limit = 1024 * 1024;
@@ -33,12 +34,13 @@ export function attachTerminals(server: Server, address: URL, store: Store, user
   let closing = false;
 
   server.on('upgrade', (req, socket, head) => {
-    if (req.url === '/ws/events') return;
+    if (isWebRpcSocket(req.url)) return;
     function reject(status: string) {
       socket.end('HTTP/1.1 ' + status + '\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
     }
-    const forceSandbox = req.url === '/ws/terminal?sandbox=1';
-    if (closing || (!forceSandbox && req.url !== '/ws/terminal')) return reject('404 Not Found');
+    const forceSandbox = req.url === '/api/ws/terminal?sandbox=1' || req.url === '/ws/terminal?sandbox=1';
+    if (closing || (!forceSandbox && req.url !== '/api/ws/terminal' && req.url !== '/ws/terminal'))
+      return reject('404 Not Found');
     if (req.headers.origin !== address.origin || req.headers.host !== address.host) return reject('403 Forbidden');
     const actor = user(req);
     if (!actor) return reject('401 Unauthorized');

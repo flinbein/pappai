@@ -268,7 +268,8 @@ export function createAuth(db: DatabaseSync, publicOrigin: string, sendMail = se
     throw new HttpError(404,"Метод не найден");
   }
   async function handle(req: IncomingMessage,res: ServerResponse,pathname: string) {
-    if (!pathname.startsWith("/auth/")) return false;
+    if (!['/auth/recover','/auth/register/options','/auth/register/verify','/auth/login/options',
+      '/auth/login/verify','/auth/logout'].includes(pathname)) return false;
     res.setHeader("Cache-Control","no-store");
     res.setHeader("Content-Type","application/json; charset=utf-8");
     try { res.end(JSON.stringify(await route(req,res,pathname))); }

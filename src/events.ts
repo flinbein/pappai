@@ -7,40 +7,59 @@ import type { Store } from './store.ts';
 type UserSession = (req:IncomingMessage,touch?:boolean)=>string|null;
 const maxBuffered = 1024 * 1024;
 
+export function isWebRpcSocket(path: string | undefined) {
+  return path === '/api/ws/web' || path === '/ws/events';
+}
+
+function validEvents(value: unknown) {
+  return value === undefined || value === true || typeof value === 'string' ||
+    (Array.isArray(value) && value.every(selector => typeof selector === 'string'));
+}
+
 export function attachEvents(server:Server, address:URL, store:Store, user:UserSession, controller:Controller) {
-  const wss = new WebSocketServer({noServer:true,perMessageDeflate:false,maxPayload:65536});
+  const wss = new WebSocketServer({noServer:true,perMessageDeflate:false});
   const clients = new Map<WebSocket,()=>boolean>();
   let closing = false;
   server.on('upgrade',(req,socket,head)=>{
-    if (req.url !== '/ws/events') return;
+    if (!isWebRpcSocket(req.url)) return;
+    const legacy = req.url === '/ws/events';
     const reject=(status:string)=>socket.end('HTTP/1.1 '+status+'\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
     if (closing) return reject('503 Service Unavailable');
     if (req.headers.origin !== address.origin || req.headers.host !== address.host) return reject('403 Forbidden');
-    const actor=user(req);
+    const actor=user(req,false);
     if (!actor) return reject('401 Unauthorized');
     wss.handleUpgrade(req,socket,head,ws=>{
       const life = new AbortController();
       const calls = new Map<string|number,AbortController>();
       let subscriptions:any[]=[];
       let filters=compileSubscriptions([],true);
-      const valid=()=>user(req,false) === actor;
+      const valid=(touch = false)=>{
+        if (user(req,touch) === actor) return true;
+        ws.close(4401,'Session expired');
+        life.abort();
+        return false;
+      };
       clients.set(ws,valid);
       const send=(value:object)=>{
         if (ws.readyState !== WebSocket.OPEN) return false;
-        if (!valid() || ws.bufferedAmount > maxBuffered) { ws.terminate(); return false; }
+        if (!valid()) return false;
+        if (ws.bufferedAmount > maxBuffered) { ws.terminate(); return false; }
         try { ws.send(JSON.stringify(value)); return true; }
         catch { ws.terminate(); return false; }
       };
       const disconnect=controller.connectUser(actor,item=>{
-        if (!valid()) { ws.terminate(); return false; }
-        const filter=filters.find(rule=>rule.enabled && store.selects(actor,item.from,rule.node ?? true) &&
+        if (!valid()) return false;
+        const matches=filters.filter(rule=>rule.enabled && store.selects(actor,item.from,rule.node ?? true) &&
           rule.matches(item.event!,item.data));
-        return !!filter && send({jsonrpc:'2.0',method:'event',params:{...item,subscription:filter.id}});
+        if (!matches.length) return false;
+        const routing = legacy ? {subscription:matches[0].id} : {subscriptionIds:matches.map(rule=>rule.id)};
+        return send({jsonrpc:'2.0',method:'event',params:{...item,...routing}});
       });
       let alive=true;
       ws.on('pong',()=>{alive=true;});
       const heartbeat=setInterval(()=>{
-        if (!alive || !valid()) return ws.terminate();
+        if (!valid()) return;
+        if (!alive) return ws.terminate();
         alive=false;
         ws.ping();
       },15000);
@@ -50,12 +69,11 @@ export function attachEvents(server:Server, address:URL, store:Store, user:UserS
         clients.delete(ws);
         clearInterval(heartbeat);
         life.abort();
-        for (const call of calls.values()) call.abort();
         calls.clear();
       });
       ws.on('error',()=>ws.terminate());
       ws.on('message',async (raw,binary)=>{
-        if (!valid()) return ws.terminate();
+        if (!valid()) return;
         let id:string|number|null=null;
         let control:AbortController|undefined;
         try {
@@ -65,16 +83,19 @@ export function attachEvents(server:Server, address:URL, store:Store, user:UserS
             typeof request.method !== 'string') throw Error('Invalid JSON-RPC request');
           id=request.id;
           if (calls.has(request.id)) throw Error('Duplicate active request id');
+          if (!valid(true)) return;
           const params=request.params ?? {};
           let result;
           if (request.method.startsWith('subscriptions.')) {
             const action=request.method.slice('subscriptions.'.length);
             if(action==='get') result={subscriptions};
             else {
+              if (!legacy && !['add','set','delete'].includes(action)) throw Error('Unknown subscription operation');
               if (action==='add' || action==='set') {
                 if (!Array.isArray(params.subscriptions) || params.subscriptions.some((r:any)=>
-                  !r || typeof r !== 'object' || Object.keys(r).some(key=>!['id','node','events'].includes(key)) ||
-                  (r.events !== undefined && typeof r.events === 'object' && !Array.isArray(r.events))))
+                  !r || typeof r !== 'object' || Array.isArray(r) ||
+                  Object.keys(r).some(key=>!['id','node','events'].includes(key)) ||
+                  !(validEvents(r.events) || (legacy && r.events === false))))
                   throw Error('Invalid WebSocket subscription');
               }
               const next=changeSubscriptions(subscriptions,action,params);
@@ -92,7 +113,7 @@ export function attachEvents(server:Server, address:URL, store:Store, user:UserS
               if (calls.size >= 100) throw Error('Too many active calls');
               control=new AbortController();
               calls.set(request.id,control);
-              result=await controller.call(actor,params,control.signal);
+              result=await controller.call(actor,params,AbortSignal.any([control.signal,life.signal]));
               break;
             case 'cancel': {
               const pending=calls.get(params.id);
@@ -103,14 +124,14 @@ export function attachEvents(server:Server, address:URL, store:Store, user:UserS
             }
             default: throw Error('Unknown WebSocket method');
           }
-          send({jsonrpc:'2.0',id,result});
+          send({jsonrpc:'2.0',id,result:result ?? null});
         } catch (error) { send({jsonrpc:'2.0',id,error:{code:-32000,message:(error as Error).message}}); }
         finally { if (control && id !== null) calls.delete(id); }
       });
     });
   });
   return {
-    checkSessions() { for (const [ws,valid] of clients) if(!valid()) ws.terminate(); },
+    checkSessions() { for (const valid of clients.values()) valid(); },
     close() {
       closing=true;
       for (const ws of clients.keys()) ws.terminate();

@@ -17,7 +17,8 @@ test('terminal upgrade checks origin, host and session; Linux bridge provides a 
   await once(server, 'listening');
   const origin = new URL('http://127.0.0.1:' + server.address().port);
   const terminals = attachTerminals(server, origin, store, req => req.headers.cookie === 'test=session' ? user.id : null);
-  const url = 'ws://' + origin.host + '/ws/terminal';
+  const base = 'ws://' + origin.host;
+  const url = base + '/api/ws/terminal';
   try {
     for (const [headers, expected] of [
       [{origin: origin.origin}, 401],
@@ -27,6 +28,14 @@ test('terminal upgrade checks origin, host and session; Linux bridge provides a 
       const ws = new WebSocket(url, {headers});
       const [error] = await once(ws, 'error');
       assert.match(error.message, new RegExp(String(expected)));
+    }
+    for (const path of ['/ws/terminal','/ws/terminal?sandbox=1','/api/ws/terminal?sandbox=1']) {
+      const ws = new WebSocket(base+path, {origin:origin.origin});
+      assert.match((await once(ws,'error'))[0].message,/401/);
+    }
+    for (const path of ['/api/ws/missing','/api/ws/terminal?sandbox=2','/api/ws/web/']) {
+      const ws = new WebSocket(base+path, {origin:origin.origin});
+      assert.match((await once(ws,'error'))[0].message,/404/);
     }
     if (process.env.PAPPAI_TEST_BWRAP === '1') {
       const ws = new WebSocket(url, {headers: {origin: origin.origin, cookie: 'test=session'}});

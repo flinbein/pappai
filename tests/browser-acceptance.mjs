@@ -16,7 +16,9 @@ const root = fileURLToPath(new URL("../", import.meta.url));
 const manifest = JSON.parse(readFileSync(new URL("../examples/extract-text/manifest.json", import.meta.url)));
 const runId = "pappai-browser-" + randomUUID();
 const require = createRequire(import.meta.url);
-const webPackage = require.resolve('@flinbein/pappai-web/package.json');
+const webPackage = process.env.PAPPAI_BROWSER_WEB_PACKAGE
+  ? join(process.env.PAPPAI_BROWSER_WEB_PACKAGE, 'package.json')
+  : require.resolve('@flinbein/pappai-web/package.json');
 const bundledVersion = require(webPackage).version;
 const webRoot = mkdtempSync(join(tmpdir(), 'pappai-browser-web-'));
 function docker(...args) {
@@ -89,17 +91,37 @@ async function rpc(page, operation, params, expectedError) {
   await page.locator("#nav-rpc").click();
   await page.locator("#operation").selectOption(operation);
   await page.locator("#params").fill(JSON.stringify(params));
-  const response = page.waitForResponse(r=>r.url().endsWith("/rpc") && r.request().postDataJSON().method === operation);
   await page.locator("#invoke button").click();
-  const payload = await (await response).json();
   if (expectedError) {
-    assert.match(payload.error?.message ?? "",expectedError);
-    await page.getByText(payload.error.message,{exact:true}).waitFor();
+    await page.locator('#notice').filter({hasText:expectedError}).waitFor();
     return;
   }
-  assert.ok(!payload.error, payload.error?.message);
-  await page.waitForFunction(v=>document.querySelector("#output").textContent===JSON.stringify(v,null,2),payload.result);
-  return payload.result;
+  await page.waitForFunction(() => !document.querySelector('#invoke button').disabled &&
+    (document.querySelector('#output').textContent || document.querySelector('#notice').textContent));
+  assert.equal(await page.locator('#notice').textContent(), '');
+  return JSON.parse(await page.locator('#output').textContent());
+}
+
+async function observePanel(context, origin) {
+  const page = await context.newPage();
+  let connected, upstream, offline = false;
+  await page.routeWebSocket('**/api/ws/web', route => {
+    if (offline) return route.close({code:1013});
+    connected = route;
+    upstream = route.connectToServer();
+  });
+  // This tab must be able to use the workspace entirely through its control socket.
+  await page.route('**/api/rpc', route => route.abort());
+  await page.goto(origin);
+  await page.locator('[data-node="~"]').waitFor();
+  return {
+    page,
+    async disconnect() {
+      offline = true;
+      await Promise.all([connected.close({code:1012}), upstream.close({code:1012})]);
+    },
+    reconnect() { offline = false; },
+  };
 }
 
 const port = await freePort();
@@ -125,6 +147,7 @@ function startInstallation(platform, workspace) {
   containerCreated = true;
 }
 try {
+  if (process.env.PAPPAI_BROWSER_WEB_PACKAGE) activateWebRelease(bundledVersion);
   docker("build","-t",runId,".");
   imageBuilt = true;
   const platform = volume("platform"), workspace = volume("workspace");
@@ -146,15 +169,32 @@ try {
       (...args) => docker("exec","-d",runId,...args));
   }
   const call = (node,method,data)=>rpc(admin,"call",{node,method,data});
+  const observer = await observePanel(admin.context(), origin);
   const {id:team} = await call("~","$.team.create",{name:"Acceptance",permissions:null});
+  await observer.page.locator(`[data-node="${team}"]`).waitFor();
   const userEmail = "limited@example.test";
   const {id:user} = await call(team,"$.user.create",{name:"Limited",email:userEmail,permissions:[]});
   const {id:app} = await call(team,"$.app.create",{
     name:"Extract",permissions:[{read:"/opt/pappai/examples/extract-text"}],source:{manifest},
   });
   assert.equal((await rpc(admin,"discover",{})).find(n=>n.id===app).status,"stopped");
+  await observer.page.locator(`[data-node="${app}"]`).click();
+  const status = observer.page.locator('#node-status');
+  await status.filter({hasText:'Остановлена'}).waitFor();
   await call(user,"$.app.start",{});
   await call(app,"$.app.start",{});
+  await status.filter({hasText:'Работает'}).waitFor();
+  await observer.disconnect();
+  const {id:missedTeam} = await call(team, '$.team.create', {name:'Created while disconnected', permissions:null});
+  await call(app, '$.app.stop', {});
+  assert.equal(await observer.page.locator(`[data-node="${missedTeam}"]`).count(), 0);
+  observer.reconnect();
+  await observer.page.locator(`[data-node="${missedTeam}"]`).waitFor();
+  await status.filter({hasText:'Остановлена'}).waitFor();
+  await call(app, '$.app.start', {});
+  await status.filter({hasText:'Работает'}).waitFor();
+  await observer.page.close();
+  console.log('PASS: live tree and selected APP status in a second tab, including missed changes after reconnect');
   const info = await rpc(admin,"help",{node:app,features:"message.extractText"});
   assert.equal(info["message.extractText"].version,"1");
   assert.equal(await call(app,"message.extractText",{text:"  Привет  "}),"Привет");
@@ -183,7 +223,7 @@ try {
   assert.equal(saved.file,file);
   assert.deepEqual(saved.override.run.settings.env.DEMO,{secret:true});
   await save({manifest:delayed});
-  const backgroundCall = async () => (await admin.request.post(origin+'/rpc',{headers:{Origin:origin},
+  const backgroundCall = async () => (await admin.request.post(origin+'/api/rpc',{headers:{Origin:origin},
     data:{jsonrpc:'2.0', id:randomUUID(), method:'call', params:{node:app,method:'message.extractText',data:{text:'wait'}}}})).json();
   const inProgress = backgroundCall();
   await exists('/var/lib/pappai/tmp/'+app+'/stop-ready');

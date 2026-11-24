@@ -17,6 +17,8 @@ Run `npm ci`, `npm run typecheck` and `npm test` to check the server-side TypeSc
 
 The optional Codex browser scenario uses a real runner and CLI with a local model response fixture. Before running `node tests/browser-acceptance.mjs`, set `PAPPAI_BROWSER_RUNNER_MODULES` to a host `node_modules` directory containing the installed runner and its dependencies, and `PAPPAI_BROWSER_CODEX_DIST` to the native Linux musl distribution directory containing `bin/codex`. Docker mounts both read-only. The test registers the runner, creates a TEAM and PROFILE, imports synthetic credentials, grants an APP access, sends a message and reads its history through the panel.
 
+To test changes across both repositories before publishing, build the frontend and set `PAPPAI_BROWSER_WEB_PACKAGE` to the absolute path of its checkout before running `node tests/browser-acceptance.mjs`. The disposable controller serves that build from a temporary release directory. Without the override, the suite uses the frontend pinned in the controller.
+
 ## Protocols
 
 - [Runner registry](runners/registry.md)

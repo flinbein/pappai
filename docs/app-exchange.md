@@ -44,17 +44,19 @@ To add a rule, pass `{"subscriptions":[{"id":"inbox","node":"mailbox-id","events
 
 ## USER and browser tab subscriptions
 
-A USER session can open `/ws/events` on the panel host. The WebSocket checks the origin and session cookie. Each connection starts with an empty subscription list. The tab re-establishes its subscriptions after reconnecting. Commands use JSON-RPC 2.0.
+A signed-in USER can open `/api/ws/web` on the panel host. Each connection starts with its own empty subscription list. The controller checks the host, origin, session and USER permissions. Requests and notifications are JSON-RPC 2.0 text messages.
 
 ```jsonl
 {"jsonrpc":"2.0","id":1,"method":"subscriptions.add","params":{"subscriptions":[{"id":"mail","node":"mailbox-id","events":"mail.received"}]}}
 {"jsonrpc":"2.0","id":1,"result":{}}
-{"jsonrpc":"2.0","method":"event","params":{"from":"mailbox-id","event":"mail.received","subscription":"mail","data":{"text":"Hello"}}}
+{"jsonrpc":"2.0","method":"event","params":{"from":"mailbox-id","event":"mail.received","subscriptionIds":["mail"],"data":{"text":"Hello"}}}
 ```
 
-A connection subscription has an ID, a source selector and event names. The commands `subscriptions.get/set/add/delete/enable/disable` manage the current tab's list. USER permissions determine the available sources and events. Delivery to a USER succeeds when at least one matching connection receives the event. The controller does not retain missed events for the next sign-in.
+A connection subscription has a unique string `id`, an optional source selector `node`, and an optional `events` filter (true, a name pattern, or an array of patterns). Omitted filters match all permitted sources or events. A connection receives one notification containing the IDs of all matching subscriptions. Delivery to the USER succeeds when at least one connection accepts the event.
 
-The connection supports `discover`, `help`, `call`, `publish` and `cancel`. To cancel an outstanding `call` with ID 42 on that connection, pass `{"id":42}` to `cancel`. Disconnecting cancels the connection's outstanding calls.
+Use `subscriptions.add` or `subscriptions.set` with `{subscriptions: [...]}`, `subscriptions.delete` with `{ids: [...]}`, and `subscriptions.get` with `{}`. Subscription changes take effect before the controller processes the next request on that connection. A successful add followed immediately by a call can produce an event before the call's response. Match responses by request ID.
+
+The connection supports `discover`, `help`, `call`, `publish` and `cancel`. To cancel an outstanding `call` with ID 42 on that connection, pass `{"id":42}` to `cancel`. Disconnecting cancels outstanding calls. A command may already have taken effect. After reconnecting, register active listeners and fetch a fresh snapshot with `discover`. The controller does not replay missed events.
 
 ## Delivery reports
 

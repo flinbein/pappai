@@ -111,8 +111,9 @@ export function createService({ db, origin, webRoot = process.env.PAPPAI_WEB_ROO
 
     let id = null;
     try {
-      if (await auth.handle(req, res, path)) {
-        if (path === '/auth/logout') { terminals.checkSessions(); events.checkSessions(); }
+      const apiPath = path.startsWith('/api/') ? path.slice('/api'.length) : path;
+      if (await auth.handle(req, res, apiPath)) {
+        if (apiPath === '/auth/logout') { terminals.checkSessions(); events.checkSessions(); }
         return;
       }
       if (path === '/files' || path.startsWith('/files/')) {
@@ -125,15 +126,15 @@ export function createService({ db, origin, webRoot = process.env.PAPPAI_WEB_ROO
         if (!auth.user(req, false)) { res.writeHead(303, {Location: '/'}).end(); return; }
         res.setHeader('Content-Security-Policy', "default-src 'self'; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'");
       }
-      if (req.method === 'GET' && await serveWeb(path, res, webRoot)) return;
+      if (path !== '/api' && !path.startsWith('/api/') && req.method === 'GET' && await serveWeb(path, res, webRoot)) return;
       res.setHeader('Content-Type', 'application/json; charset=utf-8');
-      if (path === '/session' && req.method === 'GET') {
+      if (apiPath === '/session' && req.method === 'GET') {
         const actor = auth.user(req, false);
         const admin = !!actor && store.isAdmin(actor);
         res.end(JSON.stringify({ user: actor, canChooseSandbox: admin, canManageApps: admin }));
         return;
       }
-      if (path !== '/rpc' || req.method !== 'POST') {
+      if (apiPath !== '/rpc' || req.method !== 'POST') {
         res.writeHead(404).end();
         return;
       }

@@ -19,21 +19,26 @@ async function fixture(t) {
   await once(server,'listening');
   const address=new URL('http://127.0.0.1:'+server.address().port);
   let signedIn=true;
-  const events=attachEvents(server,address,store,req=>signedIn && req.headers.cookie==='session=test' ? actor : null,controller);
-  const clients=[];
+  let touches=0;
+  const events=attachEvents(server,address,store,(req,touch=true)=>{
+    if (!signedIn || req.headers.cookie !== 'session=test') return null;
+    if (touch) touches++;
+    return actor;
+  },controller);
   t.after(async()=>{
     events.close();controller.shutdown();
     await new Promise(resolve=>server.close(resolve));
     db.close();
   });
-  const connect=async()=>{
-    const ws=new WebSocket('ws://'+address.host+'/ws/events',{origin:address.origin,headers:{cookie:'session=test'}});
-    clients.push(ws);
+  const connect=async(path='/api/ws/web')=>{
+    const ws=new WebSocket('ws://'+address.host+path,{origin:address.origin,headers:{cookie:'session=test'}});
     const pending=new Map();
     const received=[];
+    const messages=[];
     let id=0;
     ws.on('message',bytes=>{
       const message=JSON.parse(bytes.toString());
+      messages.push(message);
       if (message.id) {pending.get(message.id)?.(message);pending.delete(message.id);}
       else received.push(message);
     });
@@ -42,29 +47,124 @@ async function fixture(t) {
       pending.set(++id,resolve);
       ws.send(JSON.stringify({jsonrpc:'2.0',id,method,params}));
     });
-    return {ws,rpc,received};
+    return {ws,rpc,received,messages};
   };
-  return {store,actor,controller,runner,connect,address,logout(){signedIn=false;events.checkSessions();}};
+  return {store,actor,controller,runner,connect,address,touches:()=>touches,logout(){signedIn=false;events.checkSessions();}};
 }
 
 test('USER subscriptions belong to a single WebSocket and expire with the authenticated session',async t=>{
   const {actor,connect,logout,address}=await fixture(t);
-  const a=await connect(), b=await connect();
+  const a=await connect('/ws/events'), b=await connect();
   assert.ok((await a.rpc('discover')).result.some(node => node.id === actor));
   const help = await a.rpc('help',{node:'~',features:'$.workspace',description:false});
   assert.deepEqual(help.result['$.workspace'],{type:'document',version:'1',provides:{events:1}});
-  const rejected=new WebSocket('ws://'+address.host+'/ws/events',{origin:'https://other.example',headers:{cookie:'session=test'}});
-  assert.match((await once(rejected,'error'))[0].message,/403/);
+  for (const [headers,status] of [
+    [{origin:'https://other.example',cookie:'session=test'},403],
+    [{origin:address.origin,host:'other.example',cookie:'session=test'},403],
+    [{origin:address.origin},401],
+  ]) {
+    const rejected=new WebSocket('ws://'+address.host+'/api/ws/web',{headers});
+    assert.match((await once(rejected,'error'))[0].message,new RegExp(String(status)));
+  }
   const add={subscriptions:[{id:'ui',node:actor,events:'chat.message'}]};
   assert.deepEqual((await a.rpc('subscriptions.add',add)).result,{});
   assert.ok((await a.rpc('subscriptions.add',add)).error);
+  assert.deepEqual((await a.rpc('subscriptions.disable',{ids:['ui']})).result,{});
+  assert.equal((await a.rpc('subscriptions.get')).result.subscriptions[0].enabled,false);
+  assert.deepEqual((await a.rpc('subscriptions.enable',{ids:['ui']})).result,{});
   const report=await b.rpc('publish',{event:'chat.message',data:'hello',delivery:'status',to:actor});
   assert.deepEqual(report.result.deliveries,[{node:actor,status:'delivered'}]);
   await a.rpc('subscriptions.get');
   assert.deepEqual(a.received[0].params,{from:actor,event:'chat.message',subscription:'ui',data:'hello'});
   assert.deepEqual(b.received,[]);
   const close=Promise.all([once(a.ws,'close'),once(b.ws,'close')]);
-  logout();await close;
+  logout();
+  const [,canonicalClose]=await close;
+  assert.equal(canonicalClose[0],4401);
+});
+
+test('subscriptions apply in frame order and overlapping matches produce one event before the call response',async t=>{
+  const {connect,controller,touches}=await fixture(t);
+  const {rpc,messages,received,ws}=await connect();
+  assert.equal(touches(),0);
+  const subscribe=rpc('subscriptions.set',{subscriptions:[
+    {id:'tree',events:'$.node.created'},
+    {id:'all',node:true},
+    {id:'nested',node:['~/**'],events:['$.node.*','$.app.statusChanged']},
+    {id:'except-root',node:['!~',true]},
+    {id:'except-descendants',node:['!~/**',true]},
+    {id:'none',node:false},
+    {id:'other',node:'~'},
+  ]});
+  const create=rpc('call',{node:'~',method:'$.team.create',data:{name:'Frame order'}});
+  const [subscribed,created]=await Promise.all([subscribe,create]);
+  assert.deepEqual(subscribed.result,{});
+  const event={jsonrpc:'2.0',method:'event',params:{from:created.result.id,event:'$.node.created',
+    data:{status:'working'},subscriptionIds:['tree','all','nested','except-root']}};
+  assert.deepEqual(messages,[subscribed,event,created]);
+  assert.equal(touches(),2);
+  const passive=once(ws,'message');
+  controller.emitSystem(created.result.id,'$.node.created',{status:'working'});
+  await passive;
+  assert.equal(touches(),2,'delivery does not extend session idle expiry');
+  assert.deepEqual(received,[event,event]);
+  const permissions=[{events:Array(5000).fill('long.message.name')}];
+  assert.deepEqual((await rpc('call',{node:created.result.id,method:'$.node.permissions.set',data:{permissions}})).result,{});
+  assert.deepEqual((await rpc('call',{node:created.result.id,method:'$.node.permissions.get'})).result,{permissions});
+});
+
+test('web subscription mutations validate filters atomically and disconnect drops subscriptions',async t=>{
+  const {connect}=await fixture(t);
+  const {rpc,ws}=await connect();
+  const subscriptions=[{id:'watch'}];
+  await rpc('subscriptions.add',{subscriptions});
+  for (const invalid of [
+    {id:'a',node:[5]},{id:'a',events:false},{id:'a',events:[true]},
+    {id:'a',node:['~','!~']},{id:'a',events:{example:true}},{id:'a',enabled:true},{id:'watch'},
+  ]) assert.ok((await rpc('subscriptions.add',{subscriptions:[invalid]})).error);
+  for (const action of ['enable','disable','unknown'])
+    assert.ok((await rpc('subscriptions.'+action,{ids:['watch']})).error);
+  assert.deepEqual((await rpc('subscriptions.get')).result,{subscriptions});
+  assert.deepEqual((await rpc('subscriptions.delete',{ids:['watch']})).result,{});
+  assert.deepEqual((await rpc('subscriptions.get')).result,{subscriptions:[]});
+  await rpc('subscriptions.add',{subscriptions});
+  const closed=once(ws,'close');
+  ws.close();await closed;
+  assert.deepEqual((await (await connect()).rpc('subscriptions.get')).result,{subscriptions:[]});
+});
+
+test('web calls serialize void results and abort pending work on cancel or session revocation',async t=>{
+  const {connect,controller,store,logout}=await fixture(t);
+  const profile=store.create('~','profile',{name:'Test profile'}).id;
+  const {rpc,ws}=await connect();
+  const started=[];
+  controller.hooks.profileCall=async (_actor,_profile,method,_data,_worker,signal)=>{
+    if (method==='empty') return;
+    started.push(signal);
+    await once(signal,'abort');
+    throw Error('Call cancelled');
+  };
+  assert.deepEqual(await rpc('call',{node:profile,method:'empty'}),{jsonrpc:'2.0',id:1,result:null});
+  const first=rpc('call',{node:profile,method:'wait'});
+  assert.deepEqual((await rpc('cancel',{id:2})).result,{});
+  assert.match((await first).error.message,/cancelled/);
+  void rpc('call',{node:profile,method:'wait'});
+  await rpc('subscriptions.get');
+  assert.equal(started[1].aborted,false);
+  const closed=once(ws,'close');
+  logout();
+  assert.equal(started[1].aborted,true);
+  await closed;
+});
+
+test('broad subscriptions continue to obey current receive and call permissions',async t=>{
+  const {actor,connect,controller,store}=await fixture(t);
+  const {rpc,received}=await connect();
+  assert.deepEqual((await rpc('subscriptions.add',{subscriptions:[{id:'all'}]})).result,{});
+  store.manage(actor,actor,'$.node.permissions.set',{permissions:[]});
+  controller.emitSystem('~','$.workspace.init',{});
+  assert.match((await rpc('call',{node:'~',method:'$.team.create',data:{name:'Denied'}})).error.message,/permission/i);
+  assert.deepEqual(received,[]);
 });
 
 test('only observable recipients affect publisher reports, and timeouts leave queued events deliverable',async t=>{
