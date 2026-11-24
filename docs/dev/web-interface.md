@@ -8,7 +8,7 @@ On the panel host, `GET /`, `/runners`, `/rpc`, `/nodes/<id>` and action paths b
 
 `GET /terminal` (including `?sandbox=1`) requires a session and redirects signed-out visitors to `/`. This route serves `terminal.html` from the active release. In the integrated panel it loads the workspace with the terminal selected. Older packages supply the standalone terminal under the same filename. Workspace HTML permits inline styles so xterm.js can render after navigation from any pane.
 
-HTTP session and passkey requests use `/api/session` and `/api/auth/*`. The panel uses one `/api/ws/web` connection per signed-in tab for RPC and [event subscriptions](../app-exchange.md#user-and-browser-tab-subscriptions). Standalone HTTP clients can use `POST /api/rpc`. The terminal has its own binary `/api/ws/terminal` connection.
+HTTP session and passkey requests use `/api/session` and `/api/auth/*`. The panel uses one `/api/ws/web` connection per signed-in browser tab for RPC and [event subscriptions](../app-exchange.md#user-and-browser-tab-subscriptions). Standalone HTTP clients can use `POST /api/rpc`. Each terminal the user starts opens its own binary `/api/ws/terminal` connection. [Terminal protocol](web-terminal.md)
 
 Deploy the controller with workspace deep-link support before activating the integrated panel. It also accepts the preceding panel's routes, including `POST /rpc`, during rollout.
 

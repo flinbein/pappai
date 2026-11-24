@@ -79,20 +79,83 @@ async function accountAction(page, selector) {
   if (!await menu.evaluate(element => element.open)) await menu.locator('summary').click();
   await menu.locator(selector).click();
 }
-async function terminal(page, sandbox, forced = false) {
-  if (forced) await accountAction(page, '#isolated-terminal');
-  else await page.locator('#nav-terminal').click();
+async function launchTerminal(page, commandLine) {
+  const launcher = page.locator('#new-terminal');
+  if (await launcher.getAttribute('aria-selected') !== 'true') await launcher.click();
+  if (commandLine !== undefined) await page.locator('#terminal-command').fill(commandLine);
+  await page.locator('#start-terminal').click();
+  const selected = page.locator('.terminal-tab[data-terminal][aria-selected=true]');
+  await selected.waitFor();
+  const id = await selected.getAttribute('data-terminal');
+  const tab = page.locator(`.terminal-tab[data-terminal="${id}"]`);
+  const close = page.locator(`[data-close-terminal="${id}"]`);
+  return {tab, close};
+}
+
+async function assertTerminalState(tab, state) {
+  await tab.and(tab.page().locator(`[data-state="${state}"]`)).waitFor();
+  const dot = tab.locator('.terminal-tab-dot');
+  assert.ok(await dot.isVisible());
+  const color = await dot.evaluate(el => getComputedStyle(el).backgroundColor);
+  const channels = /^rgb\((\d+), (\d+), (\d+)\)$/.exec(color);
+  assert.ok(channels, `Expected a solid terminal status color, got ${color}`);
+  const [r, g, b] = channels.slice(1).map(Number);
+  if (state === 'online') assert.ok(g > r && g > b, `Expected green, got ${color}`);
+  if (state === 'failed') assert.ok(r > g && r > b, `Expected red, got ${color}`);
+  if (state === 'closed') assert.ok(Math.max(r,g,b) - Math.min(r,g,b) < 32, `Expected gray, got ${color}`);
+}
+
+async function sendTerminalLine(page, line) {
+  await page.bringToFront();
+  await page.locator('.terminal-frame:visible .xterm-helper-textarea').focus();
+  // BusyBox ash can consume early keystrokes while it reads xterm's reply to
+  // its cursor-position request. Wait for the shell to echo a harmless space
+  // after its prompt before delivering an entire command in a single event.
+  const cursorRow = page.locator('.terminal-frame:visible .xterm-rows > div:has(.xterm-cursor)');
+  await cursorRow.filter({hasText:/[#$]\s*$/}).waitFor();
+  let editing = false;
+  for (let attempt = 0; attempt < 10 && !editing; attempt++) {
+    await page.keyboard.press('Space');
+    try {
+      await page.waitForFunction(() => {
+        const cursor = document.querySelector('.terminal-frame:not([hidden]) .xterm-cursor');
+        const row = cursor?.closest('.xterm-rows > div');
+        if (!row) return false;
+        const range = document.createRange();
+        range.setStart(row, 0);
+        range.setEndBefore(cursor);
+        return /[#$][ \u00a0]{2,}$/.test(range.toString());
+      }, undefined, {timeout:300});
+      editing = true;
+    } catch (error) {
+      if (error.name !== 'TimeoutError') throw error;
+    }
+  }
+  assert.ok(editing, 'The interactive shell echoed input at its prompt');
+  await page.keyboard.insertText(line);
+  await page.keyboard.press('Enter');
+}
+
+async function terminal(page, {sandbox, canChooseSandbox}) {
+  if (new URL(page.url()).pathname !== '/terminal') await page.locator('#nav-terminal').click();
+  await page.locator('#new-terminal[aria-selected=true]').waitFor();
+  assert.equal(await page.locator('#terminal-command').inputValue(), '/bin/sh -i');
+  const checkbox = page.locator('#terminal-sandbox');
+  assert.equal(await checkbox.isVisible(), canChooseSandbox);
+  if (canChooseSandbox) {
+    assert.equal(await checkbox.isChecked(), false);
+    await checkbox.setChecked(sandbox);
+  }
+  const {tab, close} = await launchTerminal(page);
+  await assertTerminalState(tab, 'online');
   await page.locator('.terminal-state[data-state=online]').filter({
     hasText:sandbox ? 'В песочнице' : 'Без песочницы'}).waitFor();
   await page.waitForFunction(() => /[#$]\s*$/.test(document.querySelector('.xterm-rows')?.textContent ?? ''));
-  const input = page.locator('.xterm-helper-textarea');
   async function command(line) {
-    await page.bringToFront();
-    await input.focus();
-    await page.keyboard.insertText(line);
-    await page.keyboard.press('Enter');
+    if (await tab.getAttribute('aria-selected') !== 'true') await tab.click();
+    await sendTerminalLine(page, line);
   }
-  return {page, command};
+  return {page, tab, close, command};
 }
 async function rpc(page, operation, params, expectedError) {
   if (new URL(page.url()).pathname !== '/rpc') await accountAction(page, '#nav-rpc');
@@ -344,8 +407,12 @@ try {
   });
   const sockets = [];
   directTab.on('websocket', ws => { if (ws.url().includes('/api/ws/terminal')) sockets.push(ws); });
-  await directTab.goto(origin);
-  const direct = await terminal(directTab, false);
+  await directTab.goto(origin + '/terminal');
+  await directTab.locator('#terminal-command').waitFor();
+  assert.equal(await directTab.locator('.terminal-tab[data-terminal]').count(), 0);
+  assert.equal(sockets.length, 0, 'Opening the launch form must not start a PTY');
+  const direct = await terminal(directTab, {sandbox:false, canChooseSandbox:true});
+  assert.equal(await direct.tab.locator('.terminal-tab-title').textContent(), 'sh');
   await directTab.waitForFunction(() => window.testScreenLock?.released === false);
   await direct.command('export PANEL_TEST=still_here');
   await direct.page.locator('[data-node="~"]').click();
@@ -363,7 +430,7 @@ try {
   await direct.page.waitForFunction(() => document.querySelector('.xterm-rows')?.textContent.includes('#'));
   // This is the only interactive shell in the disposable controller. Read its
   // PID independently, then ask the original tab for $$ after switching releases.
-  const originalShell = docker('exec', runId, 'pgrep', '-xf', 'sh -i');
+  const originalShell = docker('exec', runId, 'pgrep', '-xf', '(/bin/)?sh -i');
   assert.match(originalShell, /^[1-9]\d*$/);
   const nextVersion = '0.0.0-browser-acceptance';
   activateWebRelease(nextVersion);
@@ -379,22 +446,58 @@ try {
   await direct.command('echo $$ > /tmp/web-release-session');
   await exists('/tmp/web-release-session');
   assert.equal(docker('exec', runId, 'cat', '/tmp/web-release-session'), originalShell);
-  const jailed = await terminal(limited, true);
-  const optional = await terminal(admin, true, true);
-  await optional.command("printf 'closed%s\\n' scrollback; exit");
-  await admin.locator('.terminal-state[data-state=closed]').waitFor();
+  await direct.command("printf '\\033]0;First shell\\007'");
+  await direct.tab.getByText('First shell', {exact:true}).waitFor();
+  await directTab.locator('#new-terminal').click();
+  await directTab.locator('#terminal-command').waitFor();
+  assert.equal(sockets.length, 1);
+  const second = await launchTerminal(directTab, '/bin/sh -i');
+  await assertTerminalState(second.tab, 'online');
+  await sendTerminalLine(directTab, "test -z \"$PANEL_TEST\" && printf 'isolated%s\\n' environment; printf '\\033]2;Second shell\\007'");
+  await second.tab.getByText('Second shell', {exact:true}).waitFor();
+  const activeRows = directTab.locator('.terminal-frame:visible .xterm-rows');
+  await activeRows.getByText('isolatedenvironment', {exact:true}).waitFor();
+  await direct.tab.click();
+  assert.equal(await direct.tab.locator('.terminal-tab-title').textContent(), 'First shell');
+  assert.doesNotMatch(await activeRows.textContent(), /isolatedenvironment/);
+  assert.equal(sockets.length, 2);
+  const secondaryClosed = sockets[1].waitForEvent('close');
+  await second.close.click();
+  await secondaryClosed;
+  await second.tab.waitFor({state:'detached'});
+  assert.equal(sockets[0].isClosed(), false);
+  await direct.command("printf 'retained:%s\\n' \"$PANEL_TEST\"");
+  await activeRows.getByText('retained:still_here', {exact:true}).waitFor();
+
+  const limitedSockets = [];
+  limited.on('websocket', ws => { if (ws.url().includes('/api/ws/terminal')) limitedSockets.push(ws); });
+  const jailed = await terminal(limited, {sandbox:true, canChooseSandbox:false});
+  const optional = await terminal(admin, {sandbox:true, canChooseSandbox:true});
+  await optional.command("test ! -e /opt/pappai/src && printf 'closed%s\\n' scrollback; exit");
+  await assertTerminalState(optional.tab, 'closed');
   await admin.locator('.xterm-cursor').waitFor({state:'detached'});
   await admin.locator('[data-node="~"]').click();
   assert.equal(await admin.locator('#nav-terminal .online-dot').count(), 0);
   await admin.locator('#nav-terminal').click();
-  await admin.getByRole('button', {name:'New terminal'}).waitFor();
+  await optional.tab.and(admin.locator('[aria-selected=true]')).waitFor();
   assert.match(await admin.locator('.xterm-rows').textContent(), /closedscrollback/);
   assert.ok(await admin.locator('#ctrl').isDisabled());
-  await admin.getByRole('button', {name:'New terminal'}).click();
-  await admin.locator('.terminal-state[data-state=online]').filter({hasText:'В песочнице'}).waitFor();
-  await admin.locator('.xterm-cursor').waitFor({state:'attached'});
-  await admin.getByRole('button', {name:'Close terminal'}).click();
-  await admin.locator('.terminal-state[data-state=closed]').waitFor();
+  const completed = await launchTerminal(admin,
+    `/bin/sh -c 'printf "[%s][%s][%s]\\n" "$1" "$2" "$3"; exit 7' args "two words" '' '$HOME'`);
+  await assertTerminalState(completed.tab, 'closed');
+  await admin.locator('.terminal-frame:visible .xterm-rows').getByText('[two words][][$HOME]', {exact:true}).waitFor();
+  const failed = await launchTerminal(admin, '/pappai-nonexistent-terminal-binary');
+  await assertTerminalState(failed.tab, 'failed');
+  await completed.tab.click();
+  await admin.locator('.terminal-frame:visible .xterm-rows').getByText('[two words][][$HOME]', {exact:true}).waitFor();
+  for (const session of [failed, completed, optional]) {
+    await session.close.click();
+    await session.tab.waitFor({state:'detached'});
+  }
+  await admin.locator('#new-terminal[aria-selected=true]').waitFor();
+  await admin.locator('#terminal-command').waitFor();
+  assert.equal(await admin.locator('.terminal-tab[data-terminal]').count(), 0);
+  console.log('PASS: explicit terminal launch, independent shell tabs, OSC titles, quoted arguments and lifecycle');
   // Record results on the test container filesystem via the interactive PTY.
   const tmp = '/var/lib/pappai/tmp/' + user;
   await jailed.page.setViewportSize({width:375,height:640});
@@ -444,7 +547,7 @@ try {
     assert.equal(await termPage.evaluate(() => Boolean(document.fullscreenElement)), false);
     await termPage.locator('#fullscreen').click();
     await termPage.waitForFunction(() => document.fullscreenElement?.matches('.terminal-view'));
-    assert.equal(await termPage.locator(':fullscreen .terminal-statusbar').count(), 0);
+    assert.equal(await termPage.locator(':fullscreen .terminal-statusbar, :fullscreen [role=tab]').count(), 0);
     assert.equal(await termPage.locator(':fullscreen #screen').evaluate(e => e.getBoundingClientRect().top), 0);
     await termPage.evaluate(() => {
       Object.defineProperty(visualViewport, 'height', {configurable:true, get:() => innerHeight - 220});
@@ -579,10 +682,16 @@ try {
   await jailed.command('echo ok > /tmp/interrupt');
   await exists(tmp + '/interrupt');
   await direct.page.close();
+  const extraJailed = await launchTerminal(limited, '/bin/sh -i');
+  await assertTerminalState(extraJailed.tab, 'online');
+  assert.equal(limitedSockets.length, 2);
   const signOutTab = await limited.context().newPage();
   await signOutTab.goto(origin);
-  await accountAction(signOutTab, '#logout');
-  await jailed.page.locator('#login, .terminal-state[data-state=closed]').first().waitFor();
+  await Promise.all([
+    ...limitedSockets.map(ws => ws.waitForEvent('close', {timeout:10000})),
+    accountAction(signOutTab, '#logout'),
+  ]);
+  await limited.locator('.terminal-tab[data-state=online]').first().waitFor({state:'detached'});
   await signOutTab.close();
   docker('exec', runId, 'touch', tmp + '/release', '/tmp/release');
   await exists('/tmp/direct-job');
