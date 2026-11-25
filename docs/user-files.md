@@ -1,6 +1,6 @@
 # Browse files as a USER
 
-After signing in, choose **Файлы** in the sidebar or open `/files/` on the panel host. The controller serves each directory as a page of links. Regular files, including HTML files, are available for download. A panel script can use `fetch` with the same session.
+After signing in, choose **Files** in the sidebar or open `/files/` on the panel host. The controller serves each directory as a page of links. Regular files, including HTML files, are available for download. A panel script can use `fetch` with the same session.
 
 ```js
 const response = await fetch('/files/workspace/reports/today.txt');

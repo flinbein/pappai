@@ -19,7 +19,7 @@ try {
   db.exec("BEGIN IMMEDIATE");
   try {
     const account = action === "admin" ? store.ensureAdmin(email) : store.byEmail(email);
-    if (!account) throw new Error("Аккаунт не найден");
+    if (!account) throw new Error("Account not found");
     const code = issueCode(db,account.id,action === "admin");
     db.exec("COMMIT");
     console.log(code);
@@ -28,7 +28,7 @@ try {
     throw error;
   }
 } catch (error) {
-  console.error(error instanceof Error ? error.message : "Ошибка административной команды");
+  console.error(error instanceof Error ? error.message : "Admin command failed");
   process.exitCode = 1;
 } finally {
   db.close();

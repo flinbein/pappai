@@ -7,6 +7,6 @@ export async function sendRecoveryMail(to:string, code:string, origin:string) {
   const secure=process.env.PAPPAI_SMTP_TLS!=='starttls';
   const mail=nodemailer.createTransport({host,port:Number(process.env.PAPPAI_SMTP_PORT || (secure?465:587)),
     secure, requireTLS:!secure, auth:{user,pass}, connectionTimeout:10000, socketTimeout:15000});
-  await mail.sendMail({from,to,subject:'pappai · Регистрация passkey',
-    text:`Откройте ${origin}, выберите «Зарегистрировать passkey» и введите этот одноразовый код. Код действует 10 минут.\n\n${code}\n`});
+  await mail.sendMail({from,to,subject:'pappai · Passkey registration',
+    text:`Open ${origin}, choose "Register a passkey" and enter the one-time code below. The code expires in 10 minutes.\n\n${code}\n`});
 }

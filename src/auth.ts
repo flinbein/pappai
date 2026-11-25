@@ -18,7 +18,7 @@ class HttpError extends Error {
   status: number;
   constructor(status: number, message: string) { super(message); this.status = status; }
 }
-function unauthorized(): never { throw new HttpError(401, "Ключ или одноразовый код недействителен"); }
+function unauthorized(): never { throw new HttpError(401, "Invalid passkey or one-time code"); }
 
 export function migrateAuth(db: DatabaseSync) {
   transaction(db, () => db.exec(`
@@ -61,19 +61,19 @@ export function issueCode(db: DatabaseSync, userId: string, reset = false) {
 }
 
 async function readJSON(req: IncomingMessage) {
-  if (req.headers["content-type"]?.split(";")[0] !== "application/json") throw new HttpError(415,"Требуется application/json");
+  if (req.headers["content-type"]?.split(";")[0] !== "application/json") throw new HttpError(415,"Content-Type must be application/json");
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of req) {
     size += chunk.length;
-    if (size > 64*1024) throw new HttpError(413,"Запрос слишком большой");
+    if (size > 64*1024) throw new HttpError(413,"Request body too large");
     chunks.push(chunk);
   }
   try {
     const value = JSON.parse(Buffer.concat(chunks).toString("utf8"));
     if (!value || Array.isArray(value) || typeof value !== "object") throw new Error();
     return value;
-  } catch { throw new HttpError(400,"Ожидается JSON-объект"); }
+  } catch { throw new HttpError(400,"Expected a JSON object"); }
 }
 
 function transaction<T>(db: DatabaseSync, body: () => T): T {
@@ -87,7 +87,7 @@ export function createAuth(db: DatabaseSync, publicOrigin: string, sendMail = se
   migrateAuth(db);
   const site = new URL(publicOrigin);
   const secure = site.protocol === "https:";
-  if (!secure && !(site.protocol === "http:" && site.hostname === "localhost")) throw new Error("Passkey требует HTTPS или http://localhost");
+  if (!secure && !(site.protocol === "http:" && site.hostname === "localhost")) throw new Error("Passkeys require HTTPS or http://localhost");
   const prefix = secure ? "__Host-pappai-" : "pappai-local-";
   type Ceremony = { kind:"login" | "register"; challenge:string; expires:number; grant?:string };
   const pending = new Map<string,Ceremony>();
@@ -134,7 +134,7 @@ export function createAuth(db: DatabaseSync, publicOrigin: string, sendMail = se
       pending.delete(id);
     }
     pending.delete(cookie(req,"flow"));
-    if (pending.size >= 4096) throw new HttpError(429,"Слишком много ожидающих запросов");
+    if (pending.size >= 4096) throw new HttpError(429,"Too many pending requests");
     const id = token();
     pending.set(id,{kind,challenge:value,grant,expires:now+5*minute});
     setCookie(res,"flow",id,300);
@@ -170,8 +170,8 @@ export function createAuth(db: DatabaseSync, publicOrigin: string, sendMail = se
     return userId;
   }
   async function route(req: IncomingMessage, res: ServerResponse, path: string) {
-    if (req.method !== "POST") throw new HttpError(405,"Требуется POST");
-    if (req.headers.origin !== site.origin || req.headers.host?.toLowerCase() !== site.host) throw new HttpError(403,"Недопустимый источник запроса");
+    if (req.method !== "POST") throw new HttpError(405,"This endpoint requires POST");
+    if (req.headers.origin !== site.origin || req.headers.host?.toLowerCase() !== site.host) throw new HttpError(403,"Invalid request origin");
     const body = await readJSON(req);
     if (path === '/auth/recover') {
       // Schedule lookup after returning the same response to every address.
@@ -265,7 +265,7 @@ export function createAuth(db: DatabaseSync, publicOrigin: string, sendMail = se
       setCookie(res,"session","",0);
       return {authenticated:false};
     }
-    throw new HttpError(404,"Метод не найден");
+    throw new HttpError(404,"Method not found");
   }
   async function handle(req: IncomingMessage,res: ServerResponse,pathname: string) {
     if (!['/auth/recover','/auth/register/options','/auth/register/verify','/auth/login/options',
@@ -276,7 +276,7 @@ export function createAuth(db: DatabaseSync, publicOrigin: string, sendMail = se
     catch (error) {
       if (!(error instanceof HttpError)) console.error("Authorization request failed",error);
       res.statusCode = error instanceof HttpError ? error.status : 500;
-      res.end(JSON.stringify({error:error instanceof HttpError ? error.message : "Внутренняя ошибка"}));
+      res.end(JSON.stringify({error:error instanceof HttpError ? error.message : "Internal server error"}));
     }
     return true;
   }

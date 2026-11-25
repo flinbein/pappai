@@ -2,6 +2,8 @@
 
 The workspace loads local copies of xterm.js and FitAddon for its terminal pane. Each launched terminal owns one xterm instance, WebSocket and PTY. The launch form owns none. Switching workspace panes or selecting another terminal preserves these instances. A tab keeps its rendered output when its socket closes. Fullscreen, keyboard focus and the screen wake lock belong to the visible terminal. OSC 0 and OSC 2 update that terminal's display title through xterm's `onTitleChange`.
 
+The carousel keeps inactive panels mounted and inert. Each tab owns its theme. Changing a palette updates the existing xterm instance and CSS colors while preserving the PTY, scrollback and other tabs. Copy mode snapshots the active buffer and remembers soft-wrapped lines so copying a wrapped command preserves its text.
+
 The mobile page uses the browser's visual viewport for keyboard layout. In fullscreen, subtract only the portion of the terminal box below the visible bottom edge. This also handles a browser that already resized the entire layout for the keyboard.
 
 On touch devices the fullscreen terminal anchors xterm's invisible input inside the visible area. Following the terminal cursor to the top edge can make Android Chrome pan the entire surface when the keyboard opens, even when the DOM reports the correct toolbar bounds. To verify a layout change on a phone, open fullscreen and the keyboard in both orders, then hide and reopen the keyboard. Compare the painted toolbar edge with the keyboard edge.

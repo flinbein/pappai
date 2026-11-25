@@ -68,7 +68,7 @@ async function panel(browser, origin, options = {}) {
 async function register(page, email, code) {
   await page.locator("details").filter({has:page.locator("#activate")}).locator("summary").click();
   await page.locator("#activate").getByLabel("Email",{exact:true}).fill(email);
-  await page.getByLabel("Одноразовый код").fill(code);
+  await page.getByLabel("One-time code").fill(code);
   await page.locator("#activate button").click();
   await page.locator("#workspace").waitFor({state:"visible"});
 }
@@ -96,23 +96,23 @@ async function assertTerminalState(tab, state) {
   await tab.and(tab.page().locator(`[data-state="${state}"]`)).waitFor();
   const dot = tab.locator('.terminal-tab-dot');
   assert.ok(await dot.isVisible());
-  const color = await dot.evaluate(el => getComputedStyle(el).backgroundColor);
+  const color = await dot.evaluate((el, state) => getComputedStyle(el, state === 'failed' ? '::before' : null).backgroundColor, state);
+  if (state === 'failed') assert.ok(await dot.evaluate(el => getComputedStyle(el, '::before').transform !== getComputedStyle(el, '::after').transform));
   const channels = /^rgb\((\d+), (\d+), (\d+)\)$/.exec(color);
   assert.ok(channels, `Expected a solid terminal status color, got ${color}`);
   const [r, g, b] = channels.slice(1).map(Number);
   if (state === 'online') assert.ok(g > r && g > b, `Expected green, got ${color}`);
-  if (state === 'failed') assert.ok(r > g && r > b, `Expected red, got ${color}`);
-  if (state === 'nonzero') assert.ok(r > g && g > b, `Expected orange, got ${color}`);
+  if (state === 'failed' || state === 'nonzero') assert.ok(r > g && r > b, `Expected red, got ${color}`);
   if (state === 'closed') assert.ok(Math.max(r,g,b) - Math.min(r,g,b) < 32, `Expected gray, got ${color}`);
 }
 
 async function sendTerminalLine(page, line) {
   await page.bringToFront();
-  await page.locator('.terminal-frame:visible .xterm-helper-textarea').focus();
+  await page.locator('.terminal-frame:not([hidden]) .xterm-helper-textarea').focus();
   // BusyBox ash can consume early keystrokes while it reads xterm's reply to
   // its cursor-position request. Wait for the shell to echo a harmless space
   // after its prompt before delivering an entire command in a single event.
-  const cursorRow = page.locator('.terminal-frame:visible .xterm-rows > div:has(.xterm-cursor)');
+  const cursorRow = page.locator('.terminal-frame:not([hidden]) .xterm-rows > div:has(.xterm-cursor)');
   await cursorRow.filter({hasText:/[#$]\s*$/}).waitFor();
   let editing = false;
   for (let attempt = 0; attempt < 10 && !editing; attempt++) {
@@ -221,7 +221,7 @@ async function checkMethodLink(context, origin, app) {
   assert.equal(calls.length, 0);
   await page.locator('#arguments').fill('{');
   await form.getByRole('button').click();
-  await page.locator('#method-result').filter({hasText:'Проверьте JSON'}).waitFor();
+  await page.locator('#method-result').filter({hasText:'Invalid JSON'}).waitFor();
   assert.equal(calls.length, 0);
   await page.locator('#arguments').fill(draft);
   await form.getByRole('button').click();
@@ -324,19 +324,19 @@ try {
   assert.equal((await rpc(admin,"discover",{})).find(n=>n.id===app).status,"stopped");
   await observer.page.locator(`[data-node="${app}"]`).click();
   const status = observer.page.locator('#node-status');
-  await status.filter({hasText:'Остановлена'}).waitFor();
+  await status.filter({hasText:'Stopped'}).waitFor();
   await call(user,"$.app.start",{});
   await call(app,"$.app.start",{});
-  await status.filter({hasText:'Работает'}).waitFor();
+  await status.filter({hasText:'Running'}).waitFor();
   await observer.disconnect();
   const {id:missedTeam} = await call(team, '$.team.create', {name:'Created while disconnected', permissions:null});
   await call(app, '$.app.stop', {});
   assert.equal(await observer.page.locator(`[data-node="${missedTeam}"]`).count(), 0);
   observer.reconnect();
   await observer.page.locator(`[data-node="${missedTeam}"]`).waitFor();
-  await status.filter({hasText:'Остановлена'}).waitFor();
+  await status.filter({hasText:'Stopped'}).waitFor();
   await call(app, '$.app.start', {});
-  await status.filter({hasText:'Работает'}).waitFor();
+  await status.filter({hasText:'Running'}).waitFor();
   await observer.page.close();
   console.log('PASS: live tree and selected APP status in a second tab, including missed changes after reconnect');
   const info = await rpc(admin,"help",{node:app,features:"message.extractText"});
@@ -351,7 +351,7 @@ try {
   await admin.locator('#show-management').click();
   const management = admin.locator('#app-management');
   await management.locator('#manifest-details summary').click();
-  const editor = management.getByLabel('Источник манифеста JSON');
+  const editor = management.getByLabel('Manifest source (JSON)');
   const delayed = structuredClone(manifest);
   delayed.run.settings.args = ['-e', `process.stdin.once('data',bytes=>{
     const {id}=JSON.parse(bytes);
@@ -360,8 +360,8 @@ try {
   });`];
   async function save(source) {
     await editor.fill(JSON.stringify(source,null,2));
-    await management.getByRole('button',{name:'Сохранить манифест'}).click();
-    await management.getByText('Манифест сохранён',{exact:true}).waitFor();
+    await management.getByRole('button',{name:'Save manifest'}).click();
+    await management.getByText('Manifest saved',{exact:true}).waitFor();
   }
   const file = '/opt/pappai/examples/extract-text/manifest.json';
   await save({file,override:{run:{settings:{env:{DEMO:{secret:'browser-test'}}}}}});
@@ -375,27 +375,27 @@ try {
   await exists('/var/lib/pappai/tmp/'+app+'/stop-ready');
   const waiting = backgroundCall();
   for (let i=0; i<20; i++) {
-    await management.getByRole('button',{name:'Обновить состояние'}).click();
+    await management.getByRole('button',{name:'Refresh status'}).click();
     if (await management.locator('#app-queued').textContent()==='1') break;
     await sleep(100);
   }
   assert.equal(await management.locator('#app-queued').textContent(),'1');
-  await management.getByRole('button',{name:'Остановить',exact:true}).click();
+  await management.getByRole('button',{name:'Stop',exact:true}).click();
   assert.match((await waiting).error.message,/stop/i);
   assert.equal((await inProgress).result,'finished');
   // The final call can resolve while the worker is still shutting down. This
   // view refreshes on request, so poll via the same action as the user.
-  const stopped = management.getByText('Остановлена',{exact:true});
+  const stopped = management.getByText('Stopped',{exact:true});
   for (let attempt=0; attempt<50 && !(await stopped.isVisible()); attempt++) {
-    await management.getByRole('button',{name:'Обновить состояние'}).click();
+    await management.getByRole('button',{name:'Refresh status'}).click();
     await sleep(100);
   }
   assert.ok(await stopped.isVisible(), 'APP finished stopping');
   const updated = structuredClone(manifest);
   updated.run.settings.features['message.extractText'].version='2';
   await save({manifest:updated});
-  await management.getByRole('button',{name:'Запустить',exact:true}).click();
-  await management.getByText('Работает',{exact:true}).waitFor();
+  await management.getByRole('button',{name:'Start',exact:true}).click();
+  await management.getByText('Running',{exact:true}).waitFor();
   assert.equal(await rpc(admin,'call',{node:app,method:'message.extractText',version:'2',data:{text:' v2 '}}),'v2');
   const directTab = await admin.context().newPage();
   await directTab.addInitScript(() => {
@@ -417,7 +417,8 @@ try {
   assert.equal(await direct.tab.textContent(), 'sh');
   const group = await direct.tab.locator('..').boundingBox();
   const plus = await directTab.locator('#new-terminal').boundingBox();
-  assert.ok(Math.abs(plus.x - group.x - group.width) < 2);
+  const tabGap = await directTab.locator('.terminal-tabs').evaluate(el => parseFloat(getComputedStyle(el).columnGap));
+  assert.ok(Math.abs(plus.x - group.x - group.width - tabGap) < 2);
   const closeBounds = await direct.close.boundingBox();
   assert.equal(closeBounds.width, closeBounds.height);
   assert.equal(await direct.close.evaluate(el => getComputedStyle(el).borderRadius), '50%');
@@ -463,7 +464,7 @@ try {
   await assertTerminalState(second.tab, 'online');
   await sendTerminalLine(directTab, "test -z \"$PANEL_TEST\" && printf 'isolated%s\\n' environment; printf '\\033]2;Second shell\\007'");
   await second.tab.getByText('Second shell', {exact:true}).waitFor();
-  const activeRows = directTab.locator('.terminal-frame:visible .xterm-rows');
+  const activeRows = directTab.locator('.terminal-frame:not([hidden]) .xterm-rows');
   await activeRows.getByText('isolatedenvironment', {exact:true}).waitFor();
   await direct.tab.click();
   assert.equal(await direct.tab.locator('.terminal-tab-title').textContent(), 'First shell');
@@ -495,14 +496,14 @@ try {
     `/bin/sh -c 'printf "[%s][%s][%s]\\n" "$1" "$2" "$3"; exit 7' args "two words" '' '$HOME'`);
   await assertTerminalState(completed.tab, 'nonzero');
   assert.equal(await completed.tab.locator('.terminal-tab-dot').getAttribute('title'), 'exit code 7');
-  await admin.locator('.terminal-frame:visible .xterm-rows').getByText('[two words][][$HOME]', {exact:true}).waitFor();
+  await admin.locator('.terminal-frame:not([hidden]) .xterm-rows').getByText('[two words][][$HOME]', {exact:true}).waitFor();
   const failed = await launchTerminal(admin, '/pappai-nonexistent-terminal-binary');
   await assertTerminalState(failed.tab, 'failed');
   assert.equal(await failed.tab.locator('.terminal-tab-dot').getAttribute('title'), 'error');
-  await admin.locator('.terminal-frame:visible [role=alert]').filter({hasText:/No such file/}).waitFor();
-  assert.equal(await admin.locator('.terminal-frame:visible .xterm').count(), 0);
+  await admin.locator('.terminal-frame:not([hidden]) [role=alert]').filter({hasText:/No such file/}).waitFor();
+  assert.equal(await admin.locator('.terminal-frame:not([hidden]) .xterm').count(), 0);
   await completed.tab.click();
-  await admin.locator('.terminal-frame:visible .xterm-rows').getByText('[two words][][$HOME]', {exact:true}).waitFor();
+  await admin.locator('.terminal-frame:not([hidden]) .xterm-rows').getByText('[two words][][$HOME]', {exact:true}).waitFor();
   for (const session of [failed, completed, optional]) {
     await session.close.click();
     await session.tab.waitFor({state:'detached'});
@@ -522,6 +523,12 @@ try {
   await termPage.keyboard.press('Shift');
   await termPage.locator('.terminal-toolbar').waitFor();
   await termPage.locator('#copy').waitFor();
+  await termPage.getByRole('button', {name:'Theme', exact:true}).tap();
+  const picker = termPage.locator('.terminal-theme-picker');
+  assert.equal(await picker.getByRole('button').count(), 12);
+  await picker.getByRole('button', {name:'Catppuccin Latte'}).tap();
+  assert.equal(await termPage.evaluate(() => localStorage.getItem('terminal.theme')), 'Catppuccin Latte');
+  assert.equal(await termPage.locator('.terminal-tab-group[data-selected=true]').evaluate(el => getComputedStyle(el).backgroundColor), 'rgb(239, 241, 245)');
   await termPage.setViewportSize({width:240,height:640});
   for (const id of ['terminal-input', 'terminal-tools']) {
     const toggle = termPage.locator('#' + id);
@@ -562,8 +569,8 @@ try {
     await touchStroke(termPage, '#fullscreen', 0, 0, 1, 650);
     assert.equal(await termPage.evaluate(() => Boolean(document.fullscreenElement)), false);
     await termPage.locator('#fullscreen').click();
-    await termPage.waitForFunction(() => document.fullscreenElement?.matches('.terminal-view'));
-    assert.equal(await termPage.locator(':fullscreen .terminal-statusbar, :fullscreen [role=tab]').count(), 0);
+    await termPage.waitForFunction(() => document.fullscreenElement?.matches('.terminal-workspace'));
+    assert.equal(await termPage.locator(':fullscreen .terminal-statusbar:visible, :fullscreen [role=tab]:visible').count(), 0);
     assert.equal(await termPage.locator(':fullscreen #screen').evaluate(e => e.getBoundingClientRect().top), 0);
     await termPage.evaluate(() => {
       Object.defineProperty(visualViewport, 'height', {configurable:true, get:() => innerHeight - 220});
@@ -666,9 +673,10 @@ try {
   await termPage.keyboard.press('Enter');
   await exists(tmp+'/clipboard-ok');
   await termPage.locator('#copy').tap();
-  const copyField = termPage.locator('#clipboard-text');
+  const copyField = termPage.getByRole('textbox', {name:'Terminal text'});
   await copyField.evaluate(e => {const i=e.value.indexOf('clipboard-ok');if(i<0) throw Error('Missing terminal output');e.setSelectionRange(i,i+12);});
-  await termPage.locator('#clipboard-apply').click();
+  await termPage.getByRole('button', {name:'Copy selected', exact:true}).click();
+  await copyField.waitFor({state:'hidden'});
   assert.equal(await termPage.evaluate(() => navigator.clipboard.readText()),'clipboard-ok');
   await jailed.command("printf 'clip%s\\n' boardproof");
   const marker = termPage.locator('.xterm-rows > div').filter({hasText:/^clipboardproof\s*$/});

@@ -13,7 +13,7 @@ type SessionUser = (req: IncomingMessage, touch?: boolean) => string | null;
 const validDimension = (n: unknown) => typeof n === 'number' && Number.isInteger(n) && n >= 1 && n <= 1000;
 
 function launch(store: Store, user: string, forceSandbox: boolean) {
-  if (process.platform !== 'linux') throw Error('Для веб-терминала требуется Linux-контейнер pappai');
+  if (process.platform !== 'linux') throw Error('The web terminal requires a pappai Linux container');
   const sandbox = store.sandbox(user) ?? (forceSandbox ? {read: [], write: [], network: false} : null);
   const cwd = sandbox ? '/tmp' : '/root';
   const env = {TERM: 'xterm-256color', HOME: cwd, LANG: 'C.UTF-8', PATH: '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'};
@@ -112,7 +112,7 @@ function relayTerminal(ws: WebSocket, {child, sandboxed}: ReturnType<typeof laun
     cleanup();
     if (ws.readyState !== WebSocket.OPEN) return;
     if (!started && !signal && (diagnostic || code !== 0)) {
-      return rejectStart(ws, manual, diagnostic.trim() || 'Ошибка запуска терминала');
+      return rejectStart(ws, manual, diagnostic.trim() || 'Could not start terminal');
     }
     ws.close(completed && !pending.length ? 1000 : 1011);
   });
@@ -178,10 +178,10 @@ export function attachTerminals(server: Server, address: URL, store: Store, user
           try { if (!binary) request = JSON.parse(raw.toString()); } catch {}
           const {command, cols, rows} = request ?? {};
           if (typeof command !== 'string' || !command.trim() || command.includes('\0')) {
-            return rejectStart(ws, manual, 'Укажите команду терминала', 1008);
+            return rejectStart(ws, manual, 'Enter a terminal command', 1008);
           }
           if ((cols !== undefined || rows !== undefined) && (!validDimension(cols) || !validDimension(rows))) {
-            return rejectStart(ws, manual, 'Недопустимый размер терминала', 1008);
+            return rejectStart(ws, manual, 'Invalid terminal dimensions', 1008);
           }
           start(command, cols, rows);
         });

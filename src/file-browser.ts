@@ -122,7 +122,7 @@ function entry(dir:string,name:string) {
 
 async function* page(view:View,fd:number,requested:string,actual:string,syntheticEntries?:Set<string>) {
   const title=html(requested);
-  yield '<!doctype html><html lang="ru"><meta charset="utf-8"><title>'+title+'</title><h1>'+title+'</h1><ul>\n';
+  yield '<!doctype html><html lang="en"><meta charset="utf-8"><title>'+title+'</title><h1>'+title+'</h1><ul>\n';
   if (requested !== '/') yield '<li><a href="'+link(posix.dirname(requested))+'">../</a></li>\n';
   if (syntheticEntries) {
     for (const name of [...syntheticEntries].sort()) yield entry(requested,name);
