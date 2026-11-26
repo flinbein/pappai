@@ -269,9 +269,9 @@ async function checkSharedTerminal(owner, first, second, socket) {
   const frame = '.terminal-frame:not([hidden])';
   const screen = frame + ' .terminal-screen';
   const readOnly = page => page.locator(frame+' .terminal-view[data-readonly=true]');
-  const control = page => readOnly(page).locator('.terminal-take-control button');
+  const active = page => page.locator(frame+' .terminal-view:not([data-readonly])');
   async function checkViewer(page) {
-    await control(page).waitFor();
+    await readOnly(page).waitFor();
     const hatch = await readOnly(page).locator('.terminal-screen').evaluate(el => getComputedStyle(el,'::after').backgroundImage);
     assert.match(hatch,/repeating-linear-gradient/);
   }
@@ -284,8 +284,15 @@ async function checkSharedTerminal(owner, first, second, socket) {
   };
   socket.receiver.on('message',record);
   await viewer.goto(origin+'/terminal');
+  for (const page of [owner,viewer]) {
+    // Exercise actual window focus transitions when switching Chrome targets.
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send('Emulation.setFocusEmulationEnabled',{enabled:false});
+  }
+  await viewer.bringToFront();
   await tab(firstId).click();
-  await checkViewer(viewer);
+  await active(viewer).waitFor();
+  await checkViewer(owner);
   await viewer.locator(frame+' .xterm-rows').getByText('sharedhistory',{exact:true}).waitFor();
   await tab(firstId).getByText('First shell',{exact:true}).waitFor();
   await tab(secondId).getByText('Second shell',{exact:true}).waitFor();
@@ -300,45 +307,88 @@ async function checkSharedTerminal(owner, first, second, socket) {
           await page.mouse.wheel(delta,0);
         } else await touchStroke(page,screen,-delta,0,2);
         await page.locator(`.terminal-tab[data-terminal="${id}"][aria-selected=true]`).waitFor({timeout:3000});
-        await control(page).waitFor({state:page === owner ? 'hidden' : 'visible'});
+        await active(page).waitFor();
       }
     }
   }
   await viewer.locator('.terminal-track:not([data-moving])').waitFor();
-  input.length = sizes.length = 0;
-  await readOnly(viewer).focus();
-  await viewer.keyboard.type('viewer-input');
+  // Keep the browser keyboard focus in this page while another worker port
+  // takes the PTY. This exercises the fallback with trusted key and mouse input.
+  const identity = await (await viewer.request.get(origin+'/api/session')).json();
+  await viewer.evaluate(({user,browserSession}) => {
+    window.otherTerminalWindow = new SharedWorker('/api/web-worker-v1.js',{
+      type:'module', name:JSON.stringify([user,browserSession]), extendedLifetime:true,
+    });
+    const port = window.otherTerminalWindow.port;
+    port.onmessage = ({data}) => {
+      if (data.type === 'terminal.registry') port.postMessage({type:'terminal.registryAck',seq:data.seq});
+    };
+  },identity);
+  async function showPreview() {
+    await viewer.evaluate(id => window.otherTerminalWindow.port.postMessage({type:'terminal.take',id:Number(id)}),firstId);
+    await checkViewer(viewer);
+    await readOnly(viewer).focus();
+  }
+  await showPreview();
+  sizes.length=0;
   await viewer.setViewportSize({width:860,height:600});
   await pauseForPaint(viewer);
-  assert.deepEqual(sizes,[], 'A viewer resize must not reach the PTY');
-  assert.equal(input.length,0,'Typing in a viewer must not reach the PTY');
-  await control(viewer).click();
-  await checkViewer(owner);
-  await readOnly(viewer).waitFor({state:'hidden'});
+  assert.deepEqual(sizes,[], 'A preview resize must not reach the PTY');
+  input.length=0;
+  await viewer.keyboard.down('z');
+  await active(viewer).waitFor();
+  await viewer.keyboard.down('z');
+  await viewer.keyboard.up('z');
   await sendTerminalLine(viewer,"printf 'new%s\\n' owner");
   await owner.locator(frame+' .xterm-rows').getByText('newowner',{exact:true}).waitFor();
+  assert.ok(!input.join('').includes('z'), 'The activation key and repeat must be consumed');
+
+  await showPreview();
   input.length=0;
+  await viewer.keyboard.down('Control');
+  await active(viewer).waitFor();
+  await viewer.keyboard.press('c');
+  await viewer.keyboard.up('Control');
+  await pauseForPaint(viewer);
+  assert.ok(!input.join('').includes('\x03'), 'The activation shortcut must not interrupt the program');
+
+  const grid = viewer.locator(frame+' .xterm-screen');
+  await sendTerminalLine(viewer,"printf '\\033[?1000h\\033[?1006h'");
+  await showPreview();
+  input.length=0;
+  await viewer.locator(screen).click({position:{x:20,y:15}});
+  await active(viewer).waitFor();
+  await pauseForPaint(viewer);
+  assert.ok(!input.join('').includes('\x1b[<'), 'The activation click must be consumed');
+  await showPreview();
+  await touchStroke(viewer,screen,0,0);
+  await active(viewer).waitFor();
+  await pauseForPaint(viewer);
+  assert.ok(!input.join('').includes('\x1b[<'), 'An activation tap must not click the terminal program');
+  await grid.click({position:{x:20,y:15}});
+  for (let i=0; i<50 && !input.join('').includes('\x1b[<'); i++) await sleep(20);
+  assert.ok(input.join('').includes('\x1b[<'), 'The next click should reach the terminal program');
+  await viewer.keyboard.press('Control+c');
+  await sendTerminalLine(viewer,"printf '\\033[?1000l\\033[?1006l'");
+  await showPreview();
   await owner.bringToFront();
-  await readOnly(owner).focus();
-  await owner.keyboard.press('Enter');
-  await control(viewer).waitFor();
-  await readOnly(owner).waitFor({state:'hidden'});
-  assert.ok(!/[\r\n]/.test(input.join('')), 'The takeover Enter must not reach the PTY');
-  await control(viewer).click();
-  await control(owner).waitFor();
+  await active(owner).waitFor();
+  await viewer.bringToFront();
+  await active(viewer).waitFor();
+  await viewer.evaluate(() => window.otherTerminalWindow.port.postMessage({type:'panel.detach'}));
   await viewer.reload();
   await tab(firstId).click();
+  await active(viewer).waitFor();
   await viewer.locator(frame+' .xterm-rows').getByText('newowner',{exact:true}).waitFor();
-  if (await control(viewer).isVisible()) await control(viewer).click();
-  await readOnly(viewer).waitFor({state:'hidden'});
   await sendTerminalLine(viewer,"printf 'reload%s\\n' survived");
   await owner.locator(frame+' .xterm-rows').getByText('reloadsurvived',{exact:true}).waitFor();
   await viewer.close();
-  if (await control(owner).isVisible()) await control(owner).click();
-  await readOnly(owner).waitFor({state:'hidden'});
+  await owner.bringToFront();
+
+  await active(owner).waitFor();
   assert.equal(socket.client.destroyed,false);
   socket.receiver.off('message',record);
-  console.log('PASS: shared PTY history, viewer carousel, input ownership, takeover Enter, reload and controlling tab close');
+  console.log('PASS: shared PTY history, carousel, automatic control, consumed activation key and click, reload and controlling tab close');
 }
 
 async function checkMethodLink(context, origin, app) {
@@ -679,7 +729,7 @@ try {
   await admin.locator('#nav-terminal .online-dot').waitFor();
   await admin.locator('#nav-terminal').click();
   await optional.tab.and(admin.locator('[aria-selected=true]')).waitFor();
-  assert.match(await admin.locator('.terminal-frame:not([hidden]) .xterm-rows').textContent(), /closedscrollback/);
+  await admin.locator('.terminal-frame:not([hidden]) .xterm-rows').getByText('closedscrollback',{exact:true}).waitFor();
   assert.ok(await admin.locator('.terminal-frame:not([hidden]) #ctrl').isDisabled());
   const completed = await launchTerminal(admin,
     `/bin/sh -c 'printf "[%s][%s][%s]\\n" "$1" "$2" "$3"; exit 7' args "two words" '' '$HOME'`);
@@ -907,8 +957,8 @@ try {
   await exists(tmp + '/interrupt');
   await direct.page.close();
   await remaining.click();
-  const takeControl = admin.locator('.terminal-frame:not([hidden]) .terminal-take-control button');
-  if (await takeControl.isVisible()) await takeControl.click();
+  await admin.bringToFront();
+  await admin.locator('.terminal-frame:not([hidden]) .terminal-view:not([data-readonly])').waitFor();
   await sendTerminalLine(admin,'echo $$ > /tmp/after-owner-closed');
   await exists('/tmp/after-owner-closed');
   assert.equal(docker('exec',runId,'cat','/tmp/after-owner-closed'),originalShell);
@@ -925,7 +975,7 @@ try {
   const signOutTab = await limited.context().newPage();
   await signOutTab.goto(origin+'/terminal');
   await signOutTab.locator(`.terminal-tab[data-terminal="${await jailed.tab.getAttribute('data-terminal')}"]`).click();
-  await signOutTab.locator('.terminal-frame:not([hidden]) .terminal-view[data-readonly=true]').waitFor();
+  await signOutTab.locator('.terminal-frame:not([hidden]) .terminal-view:not([data-readonly])').waitFor();
   await Promise.all([
     ...limitedSockets().map(ws => once(ws.client,'close',{signal:AbortSignal.timeout(10000)})),
     accountAction(signOutTab, '#logout'),
