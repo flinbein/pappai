@@ -5,9 +5,9 @@ import { prepare } from './manifest.ts';
 import { mask as maskSource } from './manifest-sources.ts';
 import { matchesName, validNames, validNodes, type Rule } from './permits.ts';
 import { compileSubscriptions, changeSubscriptions } from './subscriptions.ts';
-import { systemDescription, systemGroups } from './system-help.ts';
+import { systemContract } from './system-contract/index.ts';
 import { DeliveryReports, type DeliveryNotice } from './delivery-reports.ts';
-import type { Store } from './store.ts';
+import { normalizeCreateTeamData, type Store } from './store.ts';
 import type { ProcessRunner, Assignment, InputRecord } from './runner.ts';
 
 const DAY = 86_400_000;
@@ -25,7 +25,7 @@ type Config = ReturnType<typeof prepare>;
 type Runner = Pick<EventEmitter,'on'> & Pick<ProcessRunner,'dispatch'|'stop'|'rejectReply'|'deliver'|'respond'|'notify'>;
 export type ControllerHooks = {
   system?:(actor:string,node:NonNullable<ReturnType<Store['get']>>,method:string,data:any)=>{handled:boolean;result?:any}|undefined;
-  systemNames?:(type:NonNullable<ReturnType<Store['get']>>['type'])=>string[];
+  userStopped?:()=>void;
   profileCall?:(actor:string,profileId:string,method:string,data:any,callerWorkerId?:string,signal?:AbortSignal,timeoutMs?:number,callerView?:FileView)=>Promise<unknown>;
   profileCliFeatures?:()=>Map<string,{type:'cli';version:string;description:string;doc?:string;schema?:{input?:unknown}}>;
   profileFeatures?:()=>string[];
@@ -44,11 +44,10 @@ export type ControllerHooks = {
   unfinished?:(id:string)=>boolean;
   executorRequest?:(workerId:string,appId:string,method:string,params:any)=>any;
 };
-const subscriptionMethods = ['get','set','add','delete','enable','disable'].map(name=>'$.node.subscriptions.' + name);
-const appMethods = ['$.app.start','$.app.stop','$.app.restart','$.app.get','$.app.executors.get',
-  '$.app.manifest.get','$.app.manifest.getApplied','$.app.manifest.set',...subscriptionMethods];
-const appEvents = ['$.app.statusChanged','$.app.restarted','$.app.executor.failed','$.app.manifest.sourceChanged',
-  '$.node.subscriptions.updated','$.node.permissions.updated','$.node.lastIssueUpdated','$.node.created'];
+const childTypes = new Map<string, 'app' | 'team' | 'user' | 'profile'>([
+  ['$.children.createTeam', 'team'], ['$.children.createUser', 'user'],
+  ['$.children.createProfile', 'profile'], ['$.children.createApp', 'app'],
+]);
 
 function inputIssue(config: Config, method: string, version: unknown, data: unknown) {
   const feature = config.features.get(method);
@@ -217,8 +216,8 @@ export class Controller {
     const previous = this.store.get(id);
     const previousStatus = previous?.status;
     this.store.setStatus(id,status,issue);
-    if (previousStatus !== status) this.emitSystem(id,'$.app.statusChanged',{previousStatus,status});
-    if (issue && issue !== previous?.lastIssue) this.emitSystem(id,'$.node.lastIssueUpdated',{});
+    if (previousStatus !== status) this.emitSystem(id,'$.lifecycle.statusChanged',{previousStatus,status});
+    if (issue && issue !== previous?.lastIssue) this.emitSystem(id,'$.app.lastIssueChanged',{});
   }
   private failApp(id:string,issue:string) {
     this.restarting.delete(id);
@@ -233,7 +232,7 @@ export class Controller {
   manifestFailed(id:string,issue:string) {
     if (this.store.get(id)?.status !== 'working') {
       const app = this.store.get(id);
-      if (app) this.store.setStatus(id,app.status,issue);
+      if (app) this.status(id,app.status,issue);
       return;
     }
     this.failApp(id,issue);
@@ -312,7 +311,7 @@ export class Controller {
         const previous = this.failures.get(appId) ?? 0;
         this.failures.set(appId,previous + 1);
         if (previous >= worker.maxRestarts) { this.failApp(appId,reason); return; }
-        this.emitSystem(appId,'$.app.executor.failed',{},appId);
+        this.emitSystem(appId,'$.app.executors.failed',{},appId);
       }
     }
     if (!reason && worker.persistent) this.failures.delete(appId);
@@ -403,7 +402,10 @@ export class Controller {
   }
   private async invoke(actor:string,params:any,signal?:AbortSignal,worker?:Worker,callerView?:FileView):Promise<any> {
     if (this.closing) throw Error('Controller shutting down');
-    const {node:appId,method,data,version} = params;
+    const {node:appId,method,version} = params;
+    const input = method === '$.children.createTeam' && params.data && typeof params.data === 'object' && !Array.isArray(params.data)
+      ? normalizeCreateTeamData(params.data) : params.data;
+    const data = typeof method === 'string' && method.startsWith('$.') && input === undefined ? {} : input;
     if (typeof appId !== 'string' || typeof method !== 'string') throw Error('Expected node and method');
     const permitted = worker && !method.startsWith('$.') && this.workers.get(worker.id) === worker
       ? this.store.allowsLiveExecutor(actor,appId,method,data)
@@ -415,7 +417,13 @@ export class Controller {
       return this.hooks.profileCall(actor,app.id,method,data ?? {},worker?.id,signal,params.timeoutMs,callerView);
     if (app.type==='workspace' && method.startsWith('runners.') && this.hooks.workspaceCall)
       return this.hooks.workspaceCall(actor,method,data ?? {},signal,params.timeoutMs);
-    if (method.startsWith('$.')) return this.system(actor,app,method,data ?? {});
+    if (method.startsWith('$.')) {
+      const feature = systemContract(app.type).get(method);
+      if (feature?.type !== 'method') throw Error('Unknown system method');
+      if (version !== undefined && version !== feature.version) throw Error('Method version mismatch');
+      if (feature.input && !feature.input(data)) throw Error('Input does not match schema for ' + method);
+      return (await this.system(actor,app,method,data)) ?? null;
+    }
     if (app.type !== 'app' || app.status !== 'working') throw Error('APP is not working');
     const config = this.config(appId);
     const issue = inputIssue(config,method,version,data);
@@ -517,6 +525,15 @@ export class Controller {
     this.route(actor,event,data,to,report);
     return report?.result() ?? {};
   }
+  private invalidatePermissions(ownerId?:string) {
+    for (const id of this.store.permissionSubjects?.(ownerId) ?? [])
+      this.emitSystem(id,'$.effectivePermissions.invalidated',{});
+  }
+  nodeCreated(id:string,status:string) {
+    this.emitSystem(id,'$.node.created',{status});
+    // Target selectors inside permission schemas can expand when a node is added.
+    this.invalidatePermissions();
+  }
   emitSystem(source:string,event:string,data:unknown,to?:string) { this.route(source,event,data,to); }
   private route(from:string,event:string,data:unknown,to?:Rule['node'],report?:ReturnType<DeliveryReports['begin']>) {
     if (this.closing) return;
@@ -584,11 +601,20 @@ export class Controller {
     if (external?.handled) return external.result;
     const managed = this.store.manage?.(actor,node.id,method,data);
     if (managed?.handled) {
-      if (!method.endsWith('.get') && !method.endsWith('.list')) this.revalidateProfiles();
-      if (method === '$.node.permissions.set') this.emitSystem(node.id,'$.node.permissions.updated',{});
+      if (managed.changed) {
+        this.revalidateProfiles();
+        if (method === '$.permissions.set') {
+          this.emitSystem(node.id,'$.permissions.changed',{});
+          this.invalidatePermissions(node.id);
+        } else if (method === '$.team.members.add' || method === '$.team.members.remove') {
+          this.invalidatePermissions();
+        }
+      } else if (managed.changed === undefined && (method === '$.profile.scope.set' || method === '$.app.profile.set')) {
+        this.revalidateProfiles();
+      }
       return managed.result;
     }
-    if (node.type === 'app' && subscriptionMethods.includes(method)) {
+    if (node.type === 'app' && method.startsWith('$.subscriptions.')) {
       const action = method.split('.').at(-1)!;
       const current = this.store.getSubscriptions(node.id);
       if (action === 'get') return {subscriptions:current};
@@ -596,30 +622,37 @@ export class Controller {
       if (JSON.stringify(next) !== JSON.stringify(current)) {
         this.store.setSubscriptions(node.id,next);
         this.personal.delete(node.id);
-        this.emitSystem(node.id,'$.node.subscriptions.updated',{});
+        this.emitSystem(node.id,'$.subscriptions.changed',{});
       }
       return {};
     }
-    if (['$.app.create','$.team.create','$.user.create','$.profile.create'].includes(method)) {
-      if (method!=='$.profile.create' && !this.store.isAdmin(actor)) throw Error('Permission denied');
-      if (!['workspace','team'].includes(node.type)) throw Error('Parent must be a workspace or TEAM');
-      const type = method.split('.')[1] as 'app'|'team'|'user'|'profile';
+    const type = childTypes.get(method);
+    if (type) {
       const config = type === 'app' ? prepare(data.source?.manifest) : undefined;
       const created = this.store.create(node.id,type,{
         name:data.name,email:data.email,profile:data.profile,scope:data.scope,...(Object.hasOwn(data,'permissions') ? {permissions:data.permissions} : {}),
         ...(config ? {manifest:data.source.manifest} : {}),
       });
       if (config) this.configs.set(created.id,config);
-      this.emitSystem(created.id,'$.node.created',{status:created.status});
+      this.nodeCreated(created.id,created.status);
       return {id:created.id};
     }
-    if (method === '$.app.start' && ['app','user'].includes(node.type)) {
+    if (method === '$.lifecycle.get') return {status:node.status};
+    if (method === '$.lifecycle.stop' && node.type !== 'app') {
+      if (node.status !== 'stopped') {
+        this.status(node.id,'stopped');
+        if (node.type === 'profile') this.revalidateProfiles();
+        if (node.type === 'user') this.hooks.userStopped?.();
+      }
+      return {};
+    }
+    if (method === '$.lifecycle.start' || method === '$.app.forceStart') {
       if (node.status === 'stopping') throw Error('APP is stopping');
       if (node.status === 'working') return {};
       if (node.type === 'app') {
         const runnerIssue = this.runnersDown.get('*') ?? this.runnersDown.get(this.config(node.id).runnerType);
         if (runnerIssue) throw Error(runnerIssue);
-        if (this.unconfirmed.has(node.id) && data.force !== true) throw Error('Previous executor exit unconfirmed; force required');
+        if (this.unconfirmed.has(node.id) && method !== '$.app.forceStart') throw Error('Previous executor exit unconfirmed; $.app.forceStart required');
         this.unconfirmed.delete(node.id);
         this.failures.delete(node.id);
       }
@@ -630,13 +663,13 @@ export class Controller {
       const workers = this.instances(node.id);
       switch (method) {
         case '$.app.get':
-          return {status:node.status,lastIssue:node.lastIssue,...(node.profile && {profile:node.profile}),manifestChanged:this.hooks.manifestChanged?.(node.id) ?? false};
+          return {lastIssue:node.lastIssue,...(node.profile && {profile:node.profile}),manifestChanged:this.hooks.manifestChanged?.(node.id) ?? false};
         case '$.app.executors.get': {
           const config = this.config(node.id);
           return {mode:config.mode,active:workers.length,limit:config.mode === 'persistent' ? null : config.poolSize,
             queued:this.queues.get(node.id)?.length ?? 0,restarting:this.restarting.has(node.id) || this.runnersRestarting.has(config.runnerType)};
         }
-        case '$.app.stop':
+        case '$.lifecycle.stop':
           if (node.status === 'stopped' || node.status === 'stopping') return {};
           this.restarting.delete(node.id);
           this.status(node.id,workers.length ? 'stopping' : 'stopped');
@@ -656,7 +689,6 @@ export class Controller {
         case '$.app.manifest.get': return maskSource({manifest:node.manifest});
         case '$.app.manifest.getApplied': return maskSource({manifest:node.manifest}).manifest;
         case '$.app.manifest.set':
-          if (!this.store.isAdmin(actor)) throw Error('Permission denied');
           if (!data.source || Object.keys(data.source).length !== 1 || !Object.hasOwn(data.source,'manifest'))
             throw Error('Expected an inline manifest source');
           this.applyManifest(node.id,data.source.manifest);
@@ -681,27 +713,13 @@ export class Controller {
     if (app.type==='workspace' && this.store.isAdmin(actor)) {
       for (const [name,feature] of this.hooks.workspaceFeatures?.() ?? []) entries.set(name,feature);
     }
-    const core =
-      app.type === 'workspace' || app.type === 'team'
-        ? ['$.team.create', '$.user.create', '$.app.create', '$.profile.create']
-        : app.type === 'app' ? appMethods : app.type==='profile' ? this.hooks.profileFeatures?.() ?? [] : ['$.app.start'];
-    for (const name of [...core,...(this.store.managementNames?.(app.type) ?? []),...(this.hooks.systemNames?.(app.type) ?? [])])
-      entries.set(name, {
-        type: 'method',
-        version: '1',
-        description: systemDescription(name),
-      });
+    for (const [name,feature] of systemContract(app.type)) entries.set(name,feature);
     if (app.type==='profile') {
+      for (const name of this.hooks.profileFeatures?.() ?? [])
+        entries.set(name,{type:'method',version:'1',description:'Configure the registered runner on this profile.'});
       for (const [name,feature] of this.hooks.profileCliFeatures?.() ?? []) {
         if (!entries.has(name)) entries.set(name,feature);
       }
-    }
-    const events = app.type === 'app' ? appEvents : app.type === 'workspace' ? ['$.workspace.init'] : ['$.node.created','$.node.permissions.updated'];
-    for (const name of events) entries.set(name,{type:'event',version:'1',description:systemDescription(name)});
-    const names = [...entries.keys()];
-    for (const [group, summary] of Object.entries(systemGroups)) {
-      if (names.some(name => name.startsWith(group + '.')))
-        entries.set(group, {type:'document', version:'1', description:summary});
     }
     const provides = new Map<string, Record<string, number>>();
     const nested = new Set<string>();

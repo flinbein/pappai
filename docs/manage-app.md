@@ -2,7 +2,7 @@
 
 Sign in and select a node in the sidebar tree. Expand or collapse branches using the arrows. The sidebar also contains account controls and links to files, the terminal and the RPC console. On a wide screen, the selected node appears next to the sidebar. Selecting a method or another action opens a third column. On a phone, tap a breadcrumb to switch the visible pane while keeping the current URL and selection.
 
-The node pane shows the node's type and stable ID. Under **Methods and help**, select a method to inspect its version and schema, enter JSON arguments and invoke it. You can bookmark its address at `/nodes/<id>/methods/<name>`. Opening the link displays the form. The controller checks your permissions when you submit it. For complete RPC parameters, open **RPC console** at `/rpc`.
+The node pane shows the node's type and stable ID. Under **Documentation**, select a method to inspect its version and schema, enter JSON arguments and invoke it. You can bookmark its address at `/nodes/<id>/methods/<name>`. Opening the link displays the form. The controller checks your permissions when you submit it. For complete RPC parameters, open **RPC console** at `/rpc`.
 
 To create a child, select a workspace or TEAM and choose the creation action for the desired kind. Available kinds include TEAM, USER, PROFILE, a persistent Codex APP and an APP with a custom manifest source. Each form has its own address, such as `/nodes/~/create/team` for a TEAM under the workspace. The panel selects the new node if you can see it. [Create and configure a Codex agent](codex.md#from-the-web-panel)
 
@@ -16,11 +16,16 @@ Use `call` with permission for the corresponding method.
 
 | Method | Arguments in `data` | Result |
 |---|---|---|
-| `$.app.get` | `{}` | `status`, `lastIssue`, `manifestChanged`. The last field indicates whether the most recently validated configuration differs from the applied one. |
+| `$.app.get` | `{}` | `lastIssue`, `manifestChanged` and, when assigned, `profile`. The change flag indicates a validated configuration waiting to be applied. |
+| `$.lifecycle.get` | `{}` | An object such as `{"status":"working"}`. Other states are `stopped`, `stopping` and `error`. |
 | `$.app.executors.get` | `{}` | `mode`, `active`, `limit`, `queued`, `restarting`. Work that occupies a slot is already excluded from `queued`. |
-| `$.app.stop`, `$.app.start`, `$.app.restart` | `{}` | `{}` when accepted. Check the result with `$.app.get` and `$.app.executors.get`. |
+| `$.lifecycle.stop`, `$.lifecycle.start` | `{}` | `{}` when accepted. Follow transitions through `$.lifecycle.statusChanged`. |
+| `$.app.restart` | `{}` | Requests a restart of a working APP. Queued work is retained. The APP publishes `$.app.restarted` on completion. |
+| `$.app.forceStart` | `{}` | Accepts the risk of a previous executor whose exit could not be confirmed. Requires a separate permit. |
 | `$.app.manifest.get` | `{}` | The source as `{manifest}` or `{file,override?}`, with secrets masked. |
 | `$.app.manifest.getApplied` | `{}` | The applied manifest after overrides, with secrets masked. |
 | `$.app.manifest.set` | `{source}` | `{}` after validating and saving the complete source. |
+
+A last issue can change independently of lifecycle status. For example, an unreadable manifest can record a new issue while the APP is stopped. On `$.app.lastIssueChanged`, read `$.app.get` for the latest message. Before using `$.app.forceStart`, check whether the old process is still running.
 
 [Create an APP and call it](first-call.md) · [Execution and contracts](dev/architecture-review.md)

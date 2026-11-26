@@ -24,10 +24,10 @@ Issuing a code replaces the previous code from the same channel. Existing passke
 
 ### Email recovery
 
-Select email recovery on the sign-in form. The USER needs permission to call `$.user.recovery.send` and `$.user.passkeys.create` on itself. An authorized caller can also call the first method from the panel. The controller checks registration permission when adding the key. An address can receive up to ten messages per day, at least ten minutes apart. The public form gives the same response for every address.
+Select email recovery on the sign-in form. The USER needs permission for `$.user.recovery.send` and `$.user.passkeys.create` on itself. An authorized caller can invoke `$.user.recovery.send({})` from the panel. The separate `$.user.passkeys.create` permission is checked during browser registration. An address can receive up to ten messages per day, at least ten minutes apart. The public form gives the same response for every address.
 
 Set `PAPPAI_SMTP_HOST`, `PAPPAI_SMTP_FROM`, `PAPPAI_SMTP_USER` and `PAPPAI_SMTP_PASSWORD` in the controller environment. TLS on port 465 is the default. Use `PAPPAI_SMTP_TLS=starttls` for STARTTLS on port 587. Override the port with `PAPPAI_SMTP_PORT`.
 
 **Administrator recovery** uses the same `admin` command as initial setup. Running it for an existing email moves the account to the workspace root, grants full permissions, and revokes existing keys and sessions. To add another key while keeping existing access, use `otp`.
 
-Each session belongs to a specific passkey. Sessions last up to thirty days and expire after one day of inactivity. Signing out ends the current session.
+Each session belongs to a specific passkey. Sessions last up to thirty days and expire after one day of inactivity. Signing out ends the current session. Stopping a USER with `$.lifecycle.stop({})` revokes every session and closes its terminals. After `$.lifecycle.start({})` the USER can sign in again with a registered passkey.

@@ -7,6 +7,7 @@ Use this guide to configure a workspace for applications and agents. Permissions
 | Build the container and call a method from the panel | [First call](first-call.md) |
 | Register a passkey or recover administrator access | [Accounts and recovery](passkeys.md) |
 | Choose a team, runner and execution mode | [Workspace and APPs](workspace.md) |
+| Find the services available on a node and read their arguments and results | [Browse a node's contract](workspace.md#browse-a-nodes-contract) |
 | Stop an APP, inspect its queue or replace its manifest | [Manage an APP](manage-app.md) |
 | Configure permissions and team membership | [Permissions](permissions.md) |
 | Subscribe to events and connect two processes | [Events and calls](app-exchange.md) |

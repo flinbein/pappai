@@ -64,7 +64,7 @@ test('bundled panel and assets are public; terminal and RPC retain their access 
     assert.equal(terminal.status, 303);
     assert.equal(terminal.headers.location, '/');
   }
-  for (const path of ['/nodes/~', '/nodes/abc/methods/%24.app.start', '/nodes/abc/create/team',
+  for (const path of ['/nodes/~', '/nodes/abc/methods/%24.lifecycle.start', '/nodes/abc/create/team',
     '/nodes/abc/chat', '/runners', '/rpc']) {
     const page = await send(path);
     assert.equal(page.status, 200, path);
@@ -87,6 +87,31 @@ test('bundled panel and assets are public; terminal and RPC retain their access 
   }
   assert.equal((await send('/', 'GET', { Host: 'other.example' })).status, 404);
   assert.equal((await send('/api/session','GET',{Host:'other.example'})).status,404);
+});
+
+test('stopping a USER revokes all its sessions, closes terminal and event connections and retains passkeys',async t=>{
+  const {send,db,store,port,origin}=await startWeb(t);
+  const actor=store.ensureAdmin('operator@example.test').id;
+  const headers=signIn(db,actor);
+  const otherCookie='another-browser';
+  const hash=createHash('sha256').update(otherCookie).digest('hex');
+  db.prepare('INSERT INTO web_sessions VALUES(?,?,?,?)').run(hash,'key',Date.now()+60000,Date.now()+60000);
+  const clients=await Promise.all([
+    {path:'/api/ws/web',cookie:headers.Cookie},
+    {path:'/api/ws/terminal?start=manual',cookie:'pappai-local-session='+otherCookie},
+  ].map(async ({path,cookie})=>{
+    const ws=new WebSocket('ws://127.0.0.1:'+port+path,{origin,headers:{Cookie:cookie,Host:new URL(origin).host}});
+    await once(ws,'open');
+    return ws;
+  }));
+  const closed=Promise.all(clients.map(ws=>once(ws,'close')));
+  const reply=await send('/api/rpc','POST',headers,{jsonrpc:'2.0',id:1,method:'call',
+    params:{node:actor,method:'$.lifecycle.stop',data:{}}});
+  assert.deepEqual(JSON.parse(reply.body).result,{});
+  await closed;
+  assert.equal(store.get(actor)?.status,'stopped');
+  assert.equal(db.prepare('SELECT count(*) AS n FROM web_sessions').get()!.n,0);
+  assert.equal(db.prepare('SELECT count(*) AS n FROM passkeys').get()!.n,1);
 });
 
 test('HTTP and both WebSockets share the same USER session and canonical logout revokes it',async t=>{

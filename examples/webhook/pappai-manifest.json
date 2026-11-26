@@ -16,7 +16,7 @@
     {
       "node": ".",
       "events": {
-        "$.app.statusChanged": {
+        "$.lifecycle.statusChanged": {
           "type": "object",
           "properties": {"status": {"const": "working"}},
           "required": ["status"]
@@ -25,6 +25,6 @@
     },
     {"node": "~", "events": "$.workspace.init"},
     {"node": ".", "events": "$.app.restarted"},
-    {"node": ".", "events": "$.app.executor.failed"}
+    {"node": ".", "events": "$.app.executors.failed"}
   ]
 }

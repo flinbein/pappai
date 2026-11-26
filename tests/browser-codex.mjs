@@ -52,7 +52,7 @@ export async function exerciseRunnerInstaller(page, exec, detached, codex, captu
 
   await page.locator('[data-node="~"]').click();
   const install = page.locator('[data-action="methods/%24.runners.add"]');
-  if (!await install.isVisible()) await page.getByText(/^System methods \(/).click();
+  if (!await install.isVisible()) await page.getByRole('button',{name:'Expand $.runners',exact:true}).click();
   await install.click();
   await page.locator('#runner-source').fill(pkg+'@1.0.0');
   assert.equal(await page.locator('#runner-name').inputValue(), name);
@@ -127,7 +127,7 @@ export async function exerciseCodexPanel(page, exec, detached) {
   await fill('arguments','{invalid');
   await page.locator('#method-call button').click();
   await page.getByText(/Invalid JSON/).waitFor();
-  await page.locator('#feature').selectOption('$.app.statusChanged');
+  await page.locator('#feature').selectOption('$.lifecycle.statusChanged');
   assert.equal(await page.locator('#method-call').isVisible(), false);
   await page.locator('#feature').selectOption('agent.getHistory');
   await page.locator('#method-call button').click();

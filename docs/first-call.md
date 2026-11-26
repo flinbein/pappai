@@ -14,7 +14,7 @@ Open **RPC console** in the panel menu, choose `call` and send the following req
 ```json
 {
   "node": "~",
-  "method": "$.app.create",
+  "method": "$.children.createApp",
   "data": {
     "name": "extract-text",
     "permissions": [{"read": "/opt/pappai/examples/extract-text"}],
@@ -36,11 +36,11 @@ Replace `APP_ID` with the returned `id` and submit these requests through the sa
 
 | Operation | JSON parameters | Result |
 |---|---|---|
-| `call` | `{"node":"APP_ID","method":"$.app.start"}` | The APP enters `working`. |
+| `call` | `{"node":"APP_ID","method":"$.lifecycle.start"}` | The APP enters `working`. |
 | `discover` | `{}` | Visible APPs include their status. |
 | `help` | `{"node":"APP_ID","features":"message.**","schema":true}` | Method description, version and schema. |
 | `call` | `{"node":"APP_ID","method":"message.extractText","version":"1","data":{"text":"  Hello  "}}` | The string `"Hello"`. |
 
-To create a TEAM or USER, call `$.team.create` or `$.user.create` on the parent. For a USER supply `name`, `email` and `permissions`. Start it with `$.app.start` and issue a code with the `otp` command. For example, `[{"discover":true}]` allows discovery but denies `message.extractText`. Try signing in as that USER in a separate browser profile.
+To create a TEAM or USER, call `$.children.createTeam` or `$.children.createUser` on the parent. For a USER supply `name`, `email` and optional `permissions` (default `[]`). Start it with `$.lifecycle.start` and issue a code with the `otp` command. For example, `[{"discover":true}]` allows discovery but denies `message.extractText`. Try signing in as that USER in a separate browser profile. [TEAM defaults and delegated creation](permissions.md#delegate-a-team-branch)
 
 Run `docker compose stop` to stop the local installation. The `platform` volume stores settings and accounts. The `workspace` volume stores user files. The local Compose configuration grants the container `SYS_ADMIN` and disables the outer seccomp profile so bubblewrap can create nested namespaces. Validate the host configuration separately before deploying with least privilege.

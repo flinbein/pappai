@@ -51,7 +51,7 @@ test('PROFILE CLI discovery, separate permits and interactive credential import'
   const user=store.create('~','user',{name:'Operator',email:'operator@example.test',permissions:[{node:profile,methods:true}]}).id;
   store.setStatus(user,'working');
   await assert.rejects(runner.prepareCli(user,profile,cli,{}),/Permission denied/);
-  await controller.call(admin.id,{node:user,method:'$.node.permissions.set',data:{permissions:[
+  await controller.call(admin.id,{node:user,method:'$.permissions.set',data:{permissions:[
     {node:profile,cli:{[cli]:schema},methods:'fixture.setup'},
   ]}});
   const plan=await runner.prepareCli(user,profile,cli,{});

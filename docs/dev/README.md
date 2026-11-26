@@ -8,6 +8,8 @@ The controller owns the node tree, permissions, queues and call state. A runner 
 - [Restoring both volumes](restore.md) covers backups, restoration and verification.
 - [Roadmap](roadmap.md) lists the stages after the first build and links to acceptance criteria.
 - [Controller design](architecture-review.md) explains call ownership, configuration changes and trust in package publishers.
+- [Changing a system service](architecture-review.md#changing-a-system-service) describes catalog versions, dispatch, event ownership and contract tests.
+- [Node service contract upgrades](catalog-upgrade.md) covers the read-only inventory of existing permissions, subscriptions and manifest sources.
 - [The process runner](runners/process.md) describes stdin delivery and the call lifecycle.
 - [Workspace and APPs](../workspace.md) explains how to configure the platform.
 

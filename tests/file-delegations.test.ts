@@ -166,7 +166,7 @@ test('successful reply, cancellation, timeout and executor loss revoke the assig
   const path=join(dir,'test');
   writeFileSync(path,'data');
   t.after(()=>{controller.shutdown(); rmSync(dir,{recursive:true,force:true}); db.close();});
-  await controller.call(admin.id,{node:app.id,method:'$.app.start'});
+  await controller.call(admin.id,{node:app.id,method:'$.lifecycle.start'});
   for (const outcome of ['result','cancel','timeout','exit']) {
     const signal=new AbortController();
     const pending=controller.call(admin.id,{node:app.id,method:'read',read:[path],

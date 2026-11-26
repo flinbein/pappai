@@ -4,7 +4,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { Store } from './store.ts';
-import { RunnerRegistry, registryMethods } from './runner-registry.ts';
+import { RunnerRegistry } from './runner-registry.ts';
 import { initTempRoot } from './sandbox.ts';
 import { AppHttpSockets, createAppHttpRouter } from './app-http.ts';
 import { ManifestSources } from './manifest-sources.ts';
@@ -67,13 +67,13 @@ export function createService({ db, origin, webRoot = process.env.PAPPAI_WEB_ROO
     workspaceCall:(...args)=>runner.workspaceCall(...args),
     isCodex:name=>runner.isCodex(name),
     profileCall:(...args)=>runner.profileCall(...args),
-    systemNames:type=>type==='workspace'?registryMethods:type==='user'?['$.user.recovery.send']:[],
+    userStopped() { terminals.checkSessions(); events.checkSessions(); },
     system(actor,node,method,data) {
       const registry=runner.system(actor,node.id,method,data);
       if (registry.handled) return registry;
       if (method==='$.user.recovery.send' && node.type==='user')
         return {handled:true,result:auth.requestMail(actor,node.id)};
-      if(method==='$.app.start' && node.type==='app' && !runner.available((node.manifest as any)?.run?.type))
+      if((method==='$.lifecycle.start' || method==='$.app.forceStart') && node.type==='app' && !runner.available((node.manifest as any)?.run?.type))
         throw Error('Runner unavailable');
       return sources.system(actor,node,method,data);
     },
@@ -89,7 +89,7 @@ export function createService({ db, origin, webRoot = process.env.PAPPAI_WEB_ROO
     apply:(id,manifest)=>controller.applyManifest(id,manifest),
     failed:(id,issue)=>controller.manifestFailed(id,issue),
     changed:id=>controller.emitSystem(id,'$.app.manifest.sourceChanged',{},id),
-    created:id=>controller.emitSystem(id,'$.node.created',{status:'stopped'}),
+    created:id=>controller.nodeCreated(id,'stopped'),
   });
   runner.on('restarted',name=>controller.runnerRestarted(name));
   const initialized=runner.initialized.then(()=>{

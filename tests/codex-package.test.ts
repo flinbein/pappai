@@ -42,7 +42,7 @@ test('installed Codex package imports an authorized profile and handles typed wo
     const id='resp_'+turns.length;
     const toolTurn = turns.length === 4 && turns[3].includes('CHECK-WORKSPACE-TOOLS');
     const tools = [
-      {name:'pappai_call',args:{node:toolTarget,method:'$.app.get',data:{}}},
+      {name:'pappai_call',args:{node:toolTarget,method:'$.lifecycle.get',data:{}}},
       {name:'pappai_call',args:{node:toolTarget,method:'$.app.executors.get',data:{}}},
       {name:'pappai_discover',args:{}},
       {name:'pappai_help',args:{node:toolTarget,features:'$.app',description:false}},
@@ -78,10 +78,10 @@ test('installed Codex package imports an authorized profile and handles typed wo
   await writeFile(entrypoint,'process.env.PAPPAI_RUNNER_CONFIG = '+JSON.stringify(JSON.stringify(config))+
     ';\nawait import('+JSON.stringify(pathToFileURL(process.env.PAPPAI_TEST_CODEX_ENTRYPOINT!).href)+');\n');
   await call('~','$.runners.add',{name:'codex',entrypoint});
-  const {id:profile}=await call('~','$.profile.create',{name:'test profile',permissions:[]});
+  const {id:profile}=await call('~','$.children.createProfile',{name:'test profile',permissions:[]});
   assert.deepEqual(await call(profile,'codex.setup',{authFile}),{configured:true});
   for (const mode of ['oneShot','persistent']) {
-    const {id:app}=await call('~','$.app.create',{name:mode,profile,permissions:[],source:{manifest:{
+    const {id:app}=await call('~','$.children.createApp',{name:mode,profile,permissions:[],source:{manifest:{
       executors:{mode},run:{type:'codex',settings:{model:'gpt-5.4',features:{
         'agent.execute':{type:'method',description:'Count turns',version:'1',schema:{output:{type:'integer'}}},
         ...(mode==='persistent' && {
@@ -89,8 +89,8 @@ test('installed Codex package imports an authorized profile and handles typed wo
           'agent.interrupt':{type:'method',description:'Interrupt the running turn',version:'1'},
         })}}}}}});
     await call(profile,'$.profile.scope.set',{scope:[app]});
-    await call(profile,'$.profile.enable');
-    await call(app,'$.app.start');
+    await call(profile,'$.lifecycle.start');
+    await call(app,'$.lifecycle.start');
     assert.equal(await call(app,'agent.execute',{input:'first '+mode}),turns.length);
     if (mode==='persistent') {
       persistentApp=app;
@@ -104,13 +104,13 @@ test('installed Codex package imports an authorized profile and handles typed wo
     }
   }
   assert.equal(turns.length,3);
-  const createApp = (name:string,permissions:unknown[])=>call('~','$.app.create',{name,profile,permissions,source:{manifest:{
+  const createApp = (name:string,permissions:unknown[])=>call('~','$.children.createApp',{name,profile,permissions,source:{manifest:{
     executors:{mode:'oneShot'},run:{type:'codex',settings:{model:'gpt-5.4',features:{
       execute:{type:'method',description:'Check visible workspace state',version:'1',schema:{output:{type:'integer'}}}}}}}}});
   toolTarget=(await createApp('inspectee',[])).id;
-  const {id:inspector}=await createApp('inspector',[{node:toolTarget,methods:'$.app.get',discover:true}]);
+  const {id:inspector}=await createApp('inspector',[{node:toolTarget,methods:'$.lifecycle.get',discover:true}]);
   await call(profile,'$.profile.scope.set',{scope:[inspector]});
-  await call(inspector,'$.app.start');
+  await call(inspector,'$.lifecycle.start');
   assert.equal(await call(inspector,'execute',{input:'CHECK-WORKSPACE-TOOLS'}),5);
   assert.ok(['pappai_discover','pappai_help','pappai_call','pappai_publish'].every(name=>offeredTools.includes(name)));
   assert.match(workspaceResults.get('workspace_0') ?? '',/stopped/);
@@ -118,7 +118,7 @@ test('installed Codex package imports an authorized profile and handles typed wo
   assert.match(workspaceResults.get('workspace_2') ?? '',/inspectee/);
   assert.match(workspaceResults.get('workspace_3') ?? '',/provides/);
   await call(profile,'$.profile.scope.set',{scope:[persistentApp]});
-  await call(persistentApp,'$.app.start');
+  await call(persistentApp,'$.lifecycle.start');
   const interrupted=assert.rejects(call(persistentApp,'agent.execute',{input:'HOLD-UNTIL-INTERRUPTED'}),/interrupted/);
   await waitingForInterrupt.promise;
   assert.deepEqual(await call(persistentApp,'agent.interrupt'),{interrupted:true});

@@ -30,15 +30,15 @@ Give the receiver permission for events from the publisher, and add a manifest s
 
 Start both APPs. The publisher writes a `publish` request to stdout. For targeted delivery, set `params.to` to the recipient ID. The controller checks event data, receiver permissions and subscriptions. After reading the event from stdin, a handler can write a `call` request to stdout and wait for the response on stdin. See the [JSONL contract](dev/runners/process.md) for complete messages.
 
-In `oneShot` mode the shared APP pool permits 1 to 20 concurrent processes. In `persistent` mode one process runs at a time. Set `idleTimeoutMs` to terminate an idle process or use `null` to disable the timer. For automatic recovery attempts, set `maxRestarts` and subscribe to the APP's own `$.app.executor.failed` event. A `working` APP can accept work even without a running process.
+In `oneShot` mode the shared APP pool permits 1 to 20 concurrent processes. In `persistent` mode one process runs at a time. Set `idleTimeoutMs` to terminate an idle process or use `null` to disable the timer. For automatic recovery attempts, set `maxRestarts` and subscribe to the APP's own `$.app.executors.failed` event. A `working` APP can accept work even without a running process.
 
 Events and calls share a queue of up to 100 pending entries. Higher `priority` gets an earlier slot. Ties retain arrival order. When the queue is full, `canEvict:true` can remove the oldest entry at the lowest priority if that priority is at most the incoming priority. For calls, configure these fields in the method declaration. An evicted call fails.
 
 ## Personal subscriptions
 
-`$.node.subscriptions.get/set/add/delete/enable/disable` manage an APP's personal list. Each operation requires permission for its method. Manifest rules run first, followed by personal rules. Disabled rules are skipped. A matching `deny:true` ends delivery. The first allowing rule with room determines event priority. The optional `caughtBy` condition checks whether another selected APP, whose delivery the receiver may observe, accepted the event.
+`$.subscriptions.get/set/add/remove/enable/disable` manage an APP's personal list. Each operation requires permission for its method. Subscribe to `$.subscriptions.changed` on the APP to refresh the list when it changes. Manifest rules run first, followed by personal rules. Disabled rules are skipped. A matching `deny:true` ends delivery. The first allowing rule with room determines event priority. The optional `caughtBy` condition checks whether another selected APP, whose delivery the receiver may observe, accepted the event.
 
-To add a rule, pass `{"subscriptions":[{"id":"inbox","node":"mailbox-id","events":"mail.received"}]}`. A personal ID must be unique within the APP. Use `before` or `after` with an existing rule ID to position it. Using `true` places the rule at the beginning or end respectively. To disable it, pass `{"ids":["inbox"]}` to `$.node.subscriptions.disable`. Replacement, insertion and deletion are validated in full before saving. Accepted events retain their original priority and subscription ID.
+To add a rule, pass `{"subscriptions":[{"id":"inbox","node":"mailbox-id","events":"mail.received"}]}`. A personal ID must be unique within the APP. Use `before` or `after` with an existing rule ID to position it. Using `true` places the rule at the beginning or end respectively. To disable it, pass `{"ids":["inbox"]}` to `$.subscriptions.disable`. Replacement, insertion and deletion are validated in full before saving. Accepted events retain their original priority and subscription ID.
 
 [Manage an APP](manage-app.md) · [Configure a workspace](workspace.md)
 

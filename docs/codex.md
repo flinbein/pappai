@@ -9,7 +9,7 @@ As an administrator, open **Add runner** on the workspace, select **npm** and in
 3. Open **codex.authorize** on the PROFILE and run it. Visit the verification URL printed in the terminal and enter its code there. When the terminal exits with code 0, call `codex.status` with `{}` on the same PROFILE and check for `{"configured":true}`. This works on a newly created, stopped PROFILE. Successful authorization replaces any previous credentials for that runner on this PROFILE.
 4. Select the TEAM again and create **APP · Codex**. Choose the PROFILE you created. This template declares a persistent agent with message, history and interrupt methods. The permissions editor defaults to `[]`. Grant workspace permissions separately when the agent needs tools.
 5. Return to the PROFILE and open its settings. Choose the new APP in the scope dropdown, save the scope, then enable the profile. The dropdown appends the selected ID to the rules shown in the editor.
-6. Select the APP. Under **Manage APP**, choose **Start**. Open **Message agent** to send a message and read the reply. To read earlier messages, select `agent.getHistory` under **Methods and help** and call it with `{}`.
+6. Select the APP. Under **Manage APP**, choose **Start**. Open **Message agent** to send a message and read the reply. To read earlier messages, select `agent.getHistory` under **Documentation** and call it with `{}`.
 
 You can also start the same interactive login inside an existing pappai terminal:
 
@@ -24,15 +24,15 @@ The USER needs the `cli` permission for `codex.authorize`, ordinary method permi
 
 | Target | Method | Arguments |
 |---|---|---|
-| Workspace or TEAM | `$.profile.create` | `{"name":"shared","permissions":null}` |
+| Workspace or TEAM | `$.children.createProfile` | `{"name":"shared","permissions":null}` |
 | New PROFILE | `codex.setup` | `{"authFile":"/tmp/codex-auth.json"}` |
-| Workspace or TEAM | `$.app.create` | Supply the name, APP permissions, profile ID in `profile` and manifest in `source.manifest`. |
+| Workspace or TEAM | `$.children.createApp` | Supply the name, APP permissions, profile ID in `profile` and manifest in `source.manifest`. |
 | PROFILE | `$.profile.scope.set` | `{"scope":["APP_ID"]}` using the new APP's ID |
-| PROFILE | `$.profile.enable` | `{}` |
-| APP | `$.app.start` | `{}` |
+| PROFILE | `$.lifecycle.start` | `{}` |
+| APP | `$.lifecycle.start` | `{}` |
 | APP | `agent.execute` | `{"input":"Summarize the following text …"}` |
 
-`codex.setup` reads the file using the caller's file permissions. For a sandboxed USER, `/tmp` is their private temporary directory. Check the import with `codex.status({})`. To revoke access, disable the profile with `$.profile.disable`, then remove the connection with `codex.remove`. To recover an APP after access was denied, restore authorization and scope, enable the profile and call `$.app.start`.
+`codex.setup` reads the file using the caller's file permissions. For a sandboxed USER, `/tmp` is their private temporary directory. Check the import with `codex.status({})`. To revoke access, disable the profile with `$.lifecycle.stop`, then remove the connection with `codex.remove`. To recover an APP after access was denied, restore authorization and scope, enable the profile and call `$.lifecycle.start`.
 
 The [example manifests](https://github.com/flinbein/pappai-runner-codex/tree/master/examples) declare `agent.execute`. A one-shot executor returns the result of one task. A persistent executor preserves conversation history across launches. The controller checks the caller, method permission and declared schema.
 

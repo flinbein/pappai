@@ -11,8 +11,8 @@ import type { Store } from './store.ts';
 import { compilePolicySchema } from './policy-schema.ts';
 import { ProfileMethods, type ProfileReader } from './profile-methods.ts';
 
-const operations = ['get','add','disable','enable','restart','delete'];
-export const registryMethods = operations.map(op=>'$.runners.'+op);
+const operations = ['list','add','disable','enable','restart','delete'];
+const registryMethods = operations.map(op=>'$.runners.'+op);
 type Entry = {name:string; entrypoint:string|null; enabled:number; managed:number; previousEntrypoint:string|null};
 
 export class RunnerRegistry extends EventEmitter {
@@ -199,7 +199,7 @@ export class RunnerRegistry extends EventEmitter {
   }
   private async operation(op:string,data:any) {
     const entries=this.entries();
-    if(op==='get') return entries.map(entry=>{
+    if(op==='list') return entries.map(entry=>{
       const row=this.store.db.prepare('SELECT schema FROM runner_settings_schemas WHERE name=?').get(entry.name);
       const source=entry.managed && preparedRelease(join(this.root,entry.name),entry.entrypoint)?.source;
       return {name:entry.name,entrypoint:entry.entrypoint,enabled:!!entry.enabled,available:this.available(entry.name),

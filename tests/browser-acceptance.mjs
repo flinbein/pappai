@@ -478,6 +478,20 @@ async function checkMethodLink(context, origin, app) {
   await page.setViewportSize({width:1280,height:800});
   const columns = await Promise.all(['.directory','#node-content','.action-column'].map(s => page.locator(s).boundingBox()));
   assert.ok(columns.every(Boolean) && columns[0].x < columns[1].x && columns[1].x < columns[2].x);
+  const catalog = page.getByRole('navigation', {name:'Documentation'});
+  await catalog.getByRole('button', {name:'Expand $.app',exact:true}).click();
+  await catalog.getByRole('button', {name:'Expand $.app.manifest',exact:true}).click();
+  await catalog.locator('[data-action="methods/%24.app.manifest"]').click();
+  await page.locator('#feature-doc').filter({hasText:'absolute filename'}).waitFor();
+  assert.equal(await page.locator('#method-call').count(), 0);
+  await catalog.locator('[data-action="methods/%24.app.manifest.sourceChanged"]').click();
+  await page.locator('#feature-description').filter({hasText:'event'}).waitFor();
+  await page.locator('#schema-block summary').click();
+  assert.equal(JSON.parse(await page.locator('#feature-schema').textContent()).data.type, 'object');
+  assert.equal(await page.locator('#method-call').count(), 0);
+  await catalog.locator('[data-action="methods/%24.app.manifest.getApplied"]').click();
+  await page.locator('#method-call').waitFor();
+  console.log('PASS: nested APP documentation, event payload schema and callable method');
   await page.locator('[data-node="~"]').click();
   await page.locator('[data-action="create/team"]').click();
   await page.waitForURL(origin+'/nodes/~/create/team');
@@ -564,7 +578,7 @@ try {
   if (withCodex) await exerciseCodexPanel(admin,inContainer,background);
   const call = (node,method,data)=>rpc(admin,"call",{node,method,data});
   if (!withCodex) {
-    const {id}=await call('~','$.profile.create',{name:'Terminal fixture'});
+    const {id}=await call('~','$.children.createProfile',{name:'Terminal fixture'});
     await admin.locator('[data-node="'+id+'"]').click();
     await admin.locator('[data-cli-method="probe.verify"]').click();
     await admin.getByRole('button',{name:'Run',exact:true}).click();
@@ -579,19 +593,19 @@ try {
     console.log('PASS: PROFILE CLI launch in a real PTY, terminal RPC and shared group');
   }
   const observer = await observePanel(admin.context(), origin);
-  const {id:team} = await call("~","$.team.create",{name:"Acceptance",permissions:null});
+  const {id:team} = await call("~","$.children.createTeam",{name:"Acceptance",permissions:null});
   await observer.page.locator(`[data-node="${team}"]`).waitFor();
   const userEmail = "limited@example.test";
-  const {id:user} = await call(team,"$.user.create",{name:"Limited",email:userEmail,permissions:[]});
-  const {id:app} = await call(team,"$.app.create",{
+  const {id:user} = await call(team,"$.children.createUser",{name:"Limited",email:userEmail,permissions:[]});
+  const {id:app} = await call(team,"$.children.createApp",{
     name:"Extract",permissions:[{read:"/opt/pappai/examples/extract-text"}],source:{manifest},
   });
   assert.equal((await rpc(admin,"discover",{})).find(n=>n.id===app).status,"stopped");
   await observer.page.locator(`[data-node="${app}"]`).click();
   const status = observer.page.locator('#node-status');
   await status.filter({hasText:'Stopped'}).waitFor();
-  await call(user,"$.app.start",{});
-  await call(app,"$.app.start",{});
+  await call(user,"$.lifecycle.start",{});
+  await call(app,"$.lifecycle.start",{});
   await status.filter({hasText:'Running'}).waitFor();
   await observer.disconnect();
   async function offlineCall(node,method,data) {
@@ -601,13 +615,13 @@ try {
     assert.equal(reply.error,undefined);
     return reply.result;
   }
-  const {id:missedTeam} = await offlineCall(team, '$.team.create', {name:'Created while disconnected', permissions:null});
-  await offlineCall(app, '$.app.stop', {});
+  const {id:missedTeam} = await offlineCall(team, '$.children.createTeam', {name:'Created while disconnected', permissions:null});
+  await offlineCall(app, '$.lifecycle.stop', {});
   assert.equal(await observer.page.locator(`[data-node="${missedTeam}"]`).count(), 0);
   observer.reconnect();
   await observer.page.locator(`[data-node="${missedTeam}"]`).waitFor();
   await status.filter({hasText:'Stopped'}).waitFor();
-  await call(app, '$.app.start', {});
+  await call(app, '$.lifecycle.start', {});
   await status.filter({hasText:'Running'}).waitFor();
   await observer.page.close();
   console.log('PASS: live tree and selected APP status in a second tab, including missed changes after reconnect');

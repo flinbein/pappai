@@ -1,5 +1,15 @@
 # Controller design
 
+## Changing a system service
+
+Start with the service descriptor for the affected node types. Each descriptor defines the public name, type, version, English summary and manual. Methods have JSON Schema for input and output, and events have a data schema. The catalog compiles these schemas once. A service and all its descendants are shared across every type that implements it. When its membership, schemas or semantics change, update the service version and the versions of changed features. Keep existing versions for unaffected services. [Catalog by node type](../../src/system-contract/index.ts) · [Feature definitions](../../src/system-contract/feature.ts)
+
+Wire the corresponding handler or emitter to the same name. Calls check the target type, method permit, requested version and input before dispatch. TEAM creation expands omitted permissions before the caller’s argument check. The controller builds HELP from these descriptors, the active APP manifest and available runner features. Backend operations still check their own prerequisites, including runner availability and profile scope. [Dispatch and HELP](../../src/controller.ts) · [Store operations](../../src/store.ts)
+
+Emit public system events from the affected node after committing a change. Compare the old and new values independently for status, last issue and stored rules. The APP’s executor failure and manifest source notifications target the APP itself. Revoke access and recheck active executors independently of whether a subscriber receives a notification. Test the advertised input, result and event data alongside the actual state transition. [Contract tests](../../tests/system-contract.test.ts)
+
+Update examples, permissions, subscriptions and the web panel when a feature name or argument changes. A change can affect both allow and deny rules. The migration guide covers persisted rules and manifest files. [Node service contract upgrades](catalog-upgrade.md)
+
 ## Completing a call
 
 The controller stores each open call under a system ID. An APP queue holds these IDs, and the runner receives the ID of its assigned call. Replies, cancellations, timeouts and runner loss all use the same completion operation. The first terminal outcome removes the record and clears its timer. A late reply receives an error. If a success result fails output schema validation, the controller leaves the call open so the worker can correct it.

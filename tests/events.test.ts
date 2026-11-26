@@ -90,27 +90,30 @@ test('subscriptions apply in frame order and overlapping matches produce one eve
   const subscribe=rpc('subscriptions.set',{subscriptions:[
     {id:'tree',events:'$.node.created'},
     {id:'all',node:true},
-    {id:'nested',node:['~/**'],events:['$.node.*','$.app.statusChanged']},
+    {id:'nested',node:['~/**'],events:['$.node.*','$.lifecycle.statusChanged']},
     {id:'except-root',node:['!~',true]},
     {id:'except-descendants',node:['!~/**',true]},
     {id:'none',node:false},
     {id:'other',node:'~'},
   ]});
-  const create=rpc('call',{node:'~',method:'$.team.create',data:{name:'Frame order'}});
+  const create=rpc('call',{node:'~',method:'$.children.createTeam',data:{name:'Frame order'}});
   const [subscribed,created]=await Promise.all([subscribe,create]);
   assert.deepEqual(subscribed.result,{});
   const event={jsonrpc:'2.0',method:'event',params:{from:created.result.id,event:'$.node.created',
     data:{status:'working'},subscriptionIds:['tree','all','nested','except-root']}};
-  assert.deepEqual(messages,[subscribed,event,created]);
+  const invalidated=messages[2];
+  assert.equal(invalidated.params.event,'$.effectivePermissions.invalidated');
+  assert.deepEqual(invalidated.params.subscriptionIds,['all','except-root']);
+  assert.deepEqual(messages,[subscribed,event,invalidated,created]);
   assert.equal(touches(),2);
   const passive=once(ws,'message');
   controller.emitSystem(created.result.id,'$.node.created',{status:'working'});
   await passive;
   assert.equal(touches(),2,'delivery does not extend session idle expiry');
-  assert.deepEqual(received,[event,event]);
+  assert.deepEqual(received,[event,invalidated,event]);
   const permissions=[{events:Array(5000).fill('long.message.name')}];
-  assert.deepEqual((await rpc('call',{node:created.result.id,method:'$.node.permissions.set',data:{permissions}})).result,{});
-  assert.deepEqual((await rpc('call',{node:created.result.id,method:'$.node.permissions.get'})).result,{permissions});
+  assert.deepEqual((await rpc('call',{node:created.result.id,method:'$.permissions.set',data:{permissions}})).result,{});
+  assert.deepEqual((await rpc('call',{node:created.result.id,method:'$.permissions.get'})).result,{permissions});
 });
 
 test('web subscription mutations validate filters atomically and disconnect drops subscriptions',async t=>{
@@ -161,9 +164,9 @@ test('broad subscriptions continue to obey current receive and call permissions'
   const {actor,connect,controller,store}=await fixture(t);
   const {rpc,received}=await connect();
   assert.deepEqual((await rpc('subscriptions.add',{subscriptions:[{id:'all'}]})).result,{});
-  store.manage(actor,actor,'$.node.permissions.set',{permissions:[]});
+  store.manage(actor,actor,'$.permissions.set',{permissions:[]});
   controller.emitSystem('~','$.workspace.init',{});
-  assert.match((await rpc('call',{node:'~',method:'$.team.create',data:{name:'Denied'}})).error.message,/permission/i);
+  assert.match((await rpc('call',{node:'~',method:'$.children.createTeam',data:{name:'Denied'}})).error.message,/permission/i);
   assert.deepEqual(received,[]);
 });
 

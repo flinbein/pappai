@@ -99,7 +99,7 @@ export function attachEvents(server:Server, address:URL, store:Store, user:UserS
                   !(validEvents(r.events) || (legacy && r.events === false))))
                   throw Error('Invalid WebSocket subscription');
               }
-              const next=changeSubscriptions(subscriptions,action,params);
+              const next=changeSubscriptions(subscriptions,action === 'delete' ? 'remove' : action,params);
               filters=compileSubscriptions(next,true);
               subscriptions=next;
               result={};

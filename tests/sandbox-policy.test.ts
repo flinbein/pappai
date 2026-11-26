@@ -23,11 +23,11 @@ test('saving filesystem permits validates existing components and preserves prio
   symlinkSync(dir,join(dir,'alias'));
   symlinkSync(join(dir,'absent'),join(dir,'dangling'));
   for (const path of [join(dir,'alias'),join(dir,'alias','absent'),join(dir,'dangling','file')]) {
-    assert.throws(()=>store.manage(admin.id,team.id,'$.node.permissions.set',{permissions:[{write:path}]}),/symbolic/i);
+    assert.throws(()=>store.manage(admin.id,team.id,'$.permissions.set',{permissions:[{write:path}]}),/symbolic/i);
     assert.deepEqual(store.get(team.id)?.permissions,original);
   }
   const valid=[{read:join(dir,'new','future')}];
-  store.manage(admin.id,team.id,'$.node.permissions.set',{permissions:valid});
+  store.manage(admin.id,team.id,'$.permissions.set',{permissions:valid});
   assert.deepEqual(store.get(team.id)?.permissions,valid);
 });
 

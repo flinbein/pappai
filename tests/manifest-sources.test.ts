@@ -37,7 +37,7 @@ function setup(t) {
   store.allowsFile = (id,path,write) => !denied.has(id) && (process.platform==='win32' ? path===file : permission(id,path,write));
   const manager = new ManifestSources(store,hooks);
   const call = (id,method,data={}) => manager.system(admin.id,store.get(id),method,data).result;
-  const create = override => call('~','$.app.create',{name:'Hook',permissions:null,source:{file,override}}).id;
+  const create = override => call('~','$.children.createApp',{name:'Hook',permissions:null,source:{file,override}}).id;
   t.after(()=>{manager.close(); db.close(); rmSync(dir,{force:true,recursive:true});});
   return {dir,file,manifest,publish,store,manager,call,create,running,denied};
 }
@@ -79,7 +79,7 @@ test('atomic replacement updates each permitted APP, defers a running persistent
   manager.applyPending(a);
   assert.deepEqual(store.get(a).manifest.subscriptions,v2.subscriptions);
   assert.equal(manager.manifestChanged(a),false);
-  assert.throws(()=>call(c,'$.app.start'),/denied/i);
+  assert.throws(()=>call(c,'$.lifecycle.start'),/denied/i);
   assert.deepEqual(store.get(c).manifest.subscriptions,undefined);
 });
 
@@ -89,7 +89,7 @@ test('invalid source creation is atomic and existing inline nodes can switch to 
   const id = store.create('~','app',{name:'legacy',permissions:null,manifest}).id;
   assert.deepEqual(call(id,'$.app.manifest.get'),{manifest});
   const count = store.db.prepare('SELECT count(*) AS n FROM nodes').get().n;
-  assert.throws(()=>call('~','$.app.create',{name:'bad',httpName:'webhook',permissions:null,source:{file:file + '.missing'}}));
+  assert.throws(()=>call('~','$.children.createApp',{name:'bad',httpName:'webhook',permissions:null,source:{file:file + '.missing'}}));
   assert.equal(store.db.prepare('SELECT count(*) AS n FROM nodes').get().n,count);
   assert.equal(store.getByHttpName('webhook'),undefined);
   call(id,'$.app.manifest.set',{source:{file}});
@@ -103,10 +103,10 @@ test('delegated package installation rejects a later symlink to another authoriz
     t.after(()=>rmSync(dir,{force:true,recursive:true}));
     const file=join(dir,'manifest.json'), moved=join(dir,'other.json');
     const user = store.create('~','user',{name:'operator',email:'op@example.test',
-      permissions:[{node:'~',methods:'$.app.create'}]});
+      permissions:[{node:'~',methods:'$.children.createApp'}]});
     store.setStatus(user.id,'working');
     writeFileSync(file,JSON.stringify(manifest));
-    const {id} = manager.system(user.id,store.get('~'),'$.app.create',{
+    const {id} = manager.system(user.id,store.get('~'),'$.children.createApp',{
       name:'published',source:{file},permissions:[{read:dir}]}).result;
     renameSync(file,moved);
     symlinkSync(moved,file);

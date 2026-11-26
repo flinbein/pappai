@@ -13,17 +13,17 @@ test('profile membership gates launch while ordinary capabilities and files use 
   const {store,controller}=service;
   const admin=store.ensureAdmin('profiles@example.test');
   const call=(actor,node,method,data={})=>controller.call(actor,{node,method,data,timeoutMs:3000});
-  const {id:profile}=await call(admin.id,'~','$.profile.create',{name:'limited',permissions:[{methods:'echo',read:'/work'}]});
+  const {id:profile}=await call(admin.id,'~','$.children.createProfile',{name:'limited',permissions:[{methods:'echo',read:'/work'}]});
   const manifest={run:{type:'process',settings:{command:'echo',cwd:process.cwd(),features:{
     echo:{type:'method',version:'1',description:'example'}}}},executors:{mode:'oneShot'}};
-  const {id:app}=await call(admin.id,'~','$.app.create',{name:'actor',permissions:null,profile,source:{manifest}});
+  const {id:app}=await call(admin.id,'~','$.children.createApp',{name:'actor',permissions:null,profile,source:{manifest}});
   assert.equal((await call(admin.id,app,'$.app.get')).profile,profile);
-  await call(admin.id,profile,'$.profile.enable');
-  await call(admin.id,app,'$.app.start');
+  await call(admin.id,profile,'$.lifecycle.start');
+  await call(admin.id,app,'$.lifecycle.start');
   await assert.rejects(call(admin.id,app,'echo'),/profile/i);
   assert.equal(store.get(app).status,'error');
   await call(admin.id,profile,'$.profile.scope.set',{scope:[app]});
-  await call(admin.id,app,'$.app.start');
+  await call(admin.id,app,'$.lifecycle.start');
   assert.equal(store.allows(app,app,'echo'),true);
   assert.equal(store.allows(app,app,'root'),true);
   assert.equal(store.isAdmin(app),true);
@@ -34,7 +34,7 @@ test('profile membership gates launch while ordinary capabilities and files use 
   assert.equal(store.allowsFile(app,'/work/file'),true);
   assert.equal(store.allowsFile(app,'/work/file',true),true);
   assert.equal(store.sandbox(app),null);
-  await call(admin.id,app,'$.node.permissions.set',{permissions:[{methods:'other',write:'/app-only',network:true}]});
+  await call(admin.id,app,'$.permissions.set',{permissions:[{methods:'other',write:'/app-only',network:true}]});
   assert.equal(store.isAdmin(app),false);
   assert.equal(store.allows(app,app,'echo'),false);
   assert.equal(store.allowsFile(app,'/work/file'),false);
@@ -52,7 +52,7 @@ test('revoked profile stops a reserved persistent executor before its first deli
   const store=new Store(db);
   const admin=store.ensureAdmin('owner@example.test');
   const profile=store.create('~','profile',{name:'test',scope:[true],permissions:null});
-  store.manage(admin.id,profile.id,'$.profile.enable',{});
+  store.setStatus(profile.id,'working');
   const app=store.create('~','app',{name:'worker',profile:profile.id,permissions:null,manifest:{
     run:{type:'fixture',settings:{features:{answer:{type:'method',version:'1',description:'test',
       schema:{output:{type:'integer'}}}}}},executors:{mode:'persistent',maxRestarts:4}}});
@@ -83,7 +83,7 @@ test('profile HTTP MCP uses both network permits and revalidates running assignm
   const db=new DatabaseSync(':memory:'); t.after(()=>db.close());
   const store=new Store(db), owner=store.ensureAdmin('network@example.test');
   const profile=store.create('~','profile',{name:'shared',scope:[true]});
-  store.manage(owner.id,profile.id,'$.profile.enable',{});
+  store.setStatus(profile.id,'working');
   const servers={local:{url:'https://local.example.test/mcp'}};
   const makeApp=(type,settings)=>store.create('~','app',{name:type,permissions:null,profile:profile.id,
     manifest:{run:{type,settings:{...settings,features:{go:{type:'method',version:'1',description:'go'}}}},
@@ -113,17 +113,17 @@ test('profile HTTP MCP uses both network permits and revalidates running assignm
   runner.emit('exit',denied);
   const proc=await go(processApp.id), localJob=await go(local.id);
   // The profile grants network only when used by this APP.
-  await call(profile.id,'$.node.permissions.set',{permissions:[{node:agent.id,network:true}]});
+  await call(profile.id,'$.permissions.set',{permissions:[{node:agent.id,network:true}]});
   const enabled=await go(agent.id);
   assert.equal(enabled.profileMcpNetwork,true);
   assert.deepEqual(enabled.settings.mcp.profile,['shared']);
-  await call(profile.id,'$.node.permissions.set',{permissions:[{network:true}]});
+  await call(profile.id,'$.permissions.set',{permissions:[{network:true}]});
   assert.deepEqual(stops,[]);
-  await call(profile.id,'$.node.permissions.set',{permissions:[]});
+  await call(profile.id,'$.permissions.set',{permissions:[]});
   assert.deepEqual(stops,[enabled.id]);
   for (const job of [proc,localJob,enabled]) runner.emit('exit',job);
-  await call(profile.id,'$.node.permissions.set',{permissions:null});
-  await call(agent.id,'$.node.permissions.set',{permissions:[]});
+  await call(profile.id,'$.permissions.set',{permissions:null});
+  await call(agent.id,'$.permissions.set',{permissions:[]});
   const offline=await go(agent.id);
   assert.equal(offline.profileMcpNetwork,false);
   assert.equal(offline.sandbox.network,false);
@@ -154,7 +154,7 @@ test('profile revocation invalidates its file view and normal graceful stop reta
   const store=new Store(db);
   const owner=store.ensureAdmin('graceful@example.test');
   const profile=store.create('~','profile',{name:'authority',permissions:[],scope:[true]});
-  store.manage(owner.id,profile.id,'$.profile.enable',{});
+  store.setStatus(profile.id,'working');
   const manifest={run:{type:'fixture',settings:{features:{go:{type:'method',version:'1',description:'go'}}}},executors:{mode:'oneShot'}};
   const from=store.create('~','app',{name:'caller',profile:profile.id,permissions:null,manifest});
   const to=store.create('~','app',{name:'target',permissions:null,manifest});
@@ -166,7 +166,7 @@ test('profile revocation invalidates its file view and normal graceful stop reta
   const outer=call(from.id,'go');
   const first=jobs[0];
   runner.emit('started',first);
-  await call(from.id,'$.app.stop');
+  await call(from.id,'$.lifecycle.stop');
   runner.emit('request',{appId:from.id,workerId:first.id,id:'r',method:'call',params:{node:to.id,method:'go',data:{}}});
   const target=jobs[1];
   assert.ok(target,'already running executor retains APP method authorization during ordinary stop');

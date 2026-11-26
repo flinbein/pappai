@@ -1,6 +1,6 @@
 # Workspace and APPs
 
-The workspace is the root of the tree. TEAM nodes group nodes and define access boundaries. USER represents an account. APP represents an application with an address, permissions and subscriptions. For example, a Telegram bot integration and its chat agent can be separate APPs. The agent can receive permission to send messages while the integration retains the bot token.
+The workspace is the root of the tree. TEAM nodes group nodes and define access boundaries. USER represents an account. A PROFILE holds runner connections for the APPs in its scope. An APP has an address, permissions and subscriptions. For example, a Telegram bot integration and its chat agent can be separate APPs. The agent can receive permission to send messages while the integration retains the bot token.
 
 - **Runner and mode.** Choose `process` for a script or `codex` for a Codex agent. A persistent executor suits a bot that holds an open connection. A one-shot executor handles an incoming event or call and then exits.
 - **Permissions and subscriptions.** Permissions determine which operations are available. Subscriptions select events within those permissions. A subscription to incoming messages does not grant the right to send a reply.
@@ -10,15 +10,37 @@ Use `discover` to list visible nodes and `help` to inspect methods and events. T
 
 ### Browse a node's contract
 
-`help({node})` returns an object keyed by feature name. It shows entries with no registered ancestor. Each entry has a `type` (method, event or document), a `version` and a short `description`. A feature with descendants also has `provides`, counting all descendant methods, events and documents in the node's catalog. Zero counts are omitted. Any feature may have children.
+`help({node})` returns an object keyed by feature name. It shows entries with no registered ancestor. Each entry has a type (`method`, `event`, `cli` or `document`), a version and a short description. A feature with descendants also has `provides`, counting descendants by type. Zero counts are omitted. Any feature may have children.
 
-Pass `features: true` for the complete catalog, an exact name for one entry, or an array to combine selections. The pattern `chat.send.*` selects one level below the method and `chat.send.**` selects every level below it. A more detailed query could be:
+System services appear as documents whose names begin with `$.`. Each node of a supported type implements the whole service. If an agent knows the name and version of a system service from one node, it can use that same interface on another node advertising the same pair. The caller still needs permission for the operation and its arguments.
+
+| Target | System services shown in HELP | Additional features |
+|---|---|---|
+| WORKSPACE (`~`) | `$.workspace`, `$.children`, `$.runners` | Installed runners can publish administrative methods under `runners.<name>` |
+| TEAM | `$.node`, `$.permissions`, `$.children`, `$.team` | |
+| USER | `$.node`, `$.lifecycle`, `$.permissions`, `$.effectivePermissions`, `$.memberships`, `$.user` | |
+| APP | `$.node`, `$.lifecycle`, `$.permissions`, `$.effectivePermissions`, `$.memberships`, `$.subscriptions`, `$.app` | Methods, events and documents in the applied manifest |
+| PROFILE | `$.node`, `$.lifecycle`, `$.permissions`, `$.effectivePermissions`, `$.memberships`, `$.profile` | Installed runners can publish connection methods and interactive CLI features |
+
+Pass `features: true` for the complete catalog, an exact name for one entry or an array to combine selections. A trailing `.*` selects one level and `.**` selects every level below the named group. For example, request the manifest manual, its methods and the event together.
 
 ```json
-{"node":"APP_ID","features":["chat.send","chat.send.**"],"schema":true,"doc":true}
+{"node":"APP_ID","features":["$.app.manifest","$.app.manifest.**"],"schema":true,"doc":true}
 ```
 
-Available schemas and detailed documentation appear inside each selected entry. Method schemas use `input` and `output`, and event schemas use `data`. Set `description: false` for a compact index. An empty selection or an undiscoverable node returns `{}`. The selector and projection flags work the same through HTTP, WebSocket and executor requests.
+Method schemas use `input` and `output`, event schemas use `data` and CLI features can specify `input`. Read a document through `help`, invoke a method through `call`, subscribe to an event or launch a CLI through the terminal. Set `description: false` for a compact index. An empty selection or an undiscoverable node returns `{}`. These options work through HTTP, WebSocket and executor requests.
+
+## Start and stop nodes
+
+Call `$.lifecycle.get({})` on an APP, USER or PROFILE for its current status. Use `$.lifecycle.start({})` and `$.lifecycle.stop({})` on that same node. A successful command returns `{}`. The node publishes `$.lifecycle.statusChanged` with `previousStatus` and `status` when it changes state.
+
+| Target | Stop | Start |
+|---|---|---|
+| APP | Clear pending work and retire executors. Status can remain `stopping` until the last process exits. | Accept new work. A stopping APP must finish its transition first. Runner or manifest errors can prevent startup. |
+| USER | Revoke web sessions and close terminals, including shared tabs and CLI sessions. Registered passkeys survive. | Allow a new sign-in. The user opens a new session and new terminals. |
+| PROFILE | Revoke the use of credentials by executors and retain the saved connection. | Allow new executors from APPs matching the current scope. |
+
+The common `$.node.get({})` summary includes `id`, `type`, `name`, `parentId` and `status`. The newly created child publishes `$.node.created` with its initial status. TEAM starts in `working`. APP, USER and PROFILE start in `stopped`. See [APP restart and recovery](manage-app.md).
 
 ## File permissions
 

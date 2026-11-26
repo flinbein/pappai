@@ -1,6 +1,6 @@
 # Runner profiles
 
-The controller stores PROFILE nodes and checks whether an APP is in scope before allowing it to use a profile. A new PROFILE is disabled. Bind it using `profile` in `$.app.create` or `$.app.profile.set({profile})`. Inspect its state with `$.profile.get` and the APP's binding with `$.app.get`. [Codex setup example](../../codex.md)
+The controller stores PROFILE nodes and checks whether an APP is in scope before allowing it to use a profile. A new PROFILE is stopped. Bind it using `profile` in `$.children.createApp` or `$.app.profile.set({profile})`. Read its status with `$.lifecycle.get`, its scope with `$.profile.scope.get` and the APP's binding with `$.app.get`. [Codex setup example](../../codex.md)
 
 ## Profile contents
 

@@ -31,19 +31,19 @@ test('a registered IPC runner validates and receives its own settings without pr
   t.after(async ()=>{await service.close();db.close();rmSync(dir,{recursive:true,force:true});});
   const actor = service.store.ensureAdmin('registry@example.test');
   const call = (node,method,data)=>service.controller.call(actor.id,{node,method,data,timeoutMs:3000});
-  await assert.rejects(call('~','$.runners.add',{name:'prepend',entrypoint,config:{}}),/Unexpected/);
+  await assert.rejects(call('~','$.runners.add',{name:'prepend',entrypoint,config:{}}),/schema/);
   await call('~','$.runners.add',{name:'prepend',entrypoint});
   const help=service.controller.help(actor.id,{node:'~',features:'runners.prepend.version'});
   assert.equal(help['runners.prepend.version']?.description,'Runner version');
-  const runners = await call('~','$.runners.get',{});
+  const runners = await call('~','$.runners.list',{});
   assert.deepEqual(runners.find(entry=>entry.name==='prepend').settingsSchema,settingsSchema);
   const source = prefix=>({manifest:{run:{type:'prepend',settings:{prefix,features:{
     format:{type:'method',version:'1',description:'prepend a prefix',schema:{input:{type:'string'}}}}}},
     executors:{mode:'oneShot'}}});
-  const {id}=await call('~','$.app.create',{name:'formatter',permissions:[],source:source('test:')});
+  const {id}=await call('~','$.children.createApp',{name:'formatter',permissions:[],source:source('test:')});
   await assert.rejects(call(id,'$.app.manifest.set',{source:source(17)}),/registered runner schema/);
   assert.equal(service.controller.help(actor.id,{node:id}).format.version,'1');
-  await call(id,'$.app.start',{});
+  await call(id,'$.lifecycle.start',{});
   assert.deepEqual(await call(id,'format','hello'),{text:'test:hello',command:false,cwd:false,config:{},holdFirst:false});
   const broken=join(install,'broken.cjs');
   writeFileSync(broken,'process.exit(1);');
@@ -52,7 +52,7 @@ test('a registered IPC runner validates and receives its own settings without pr
   const replacement=join(install,'replacement.cjs');
   writeFileSync(replacement,`process.send({type:'runnerReady',payload:{}});process.on('message',m=>{if(m.type==='close')process.disconnect()})`);
   await call('~','$.runners.restart',{name:'prepend',entrypoint:replacement});
-  assert.equal((await call('~','$.runners.get',{})).find(r=>r.name==='prepend').previousEntrypoint,entrypoint);
+  assert.equal((await call('~','$.runners.list',{})).find(r=>r.name==='prepend').previousEntrypoint,entrypoint);
   await call('~','$.runners.restart',{name:'prepend',entrypoint});
   const restricted=service.store.create('~','user',{name:'limited',email:'limited@example.test',permissions:[{node:'~',methods:true}]});
   service.store.setStatus(restricted.id,'working');
@@ -66,7 +66,7 @@ test('a registered IPC runner validates and receives its own settings without pr
     if (m.type==='dispatch'){const {id,appId}=m.job;process.send({type:'reply',payload:{id,appId,result:'reinstalled'}})}
   });`);
   await call('~','$.runners.add',{name:'prepend',entrypoint});
-  await call(id,'$.app.start',{});
+  await call(id,'$.lifecycle.start',{});
   assert.equal(await call(id,'format','hello'),'reinstalled');
 });
 
@@ -112,7 +112,7 @@ test('registered profile host reads an input through the actual caller file view
   const admin=store.ensureAdmin('owner@example.test');
   const call=(actor,node,method,data={})=>controller.call(actor,{node,method,data,timeoutMs:2500});
   await call(admin.id,'~','$.runners.add',{name:'fixture',entrypoint});
-  const {id}=await call(admin.id,'~','$.profile.create',{name:'profile'});
+  const {id}=await call(admin.id,'~','$.children.createProfile',{name:'profile'});
   assert.deepEqual(await call(admin.id,id,'fixture.check',{file}),{bytes:16});
   assert.equal(controller.help(admin.id,{node:id})['fixture.check'].version,'1');
   const restricted=store.create('~','user',{name:'reader',email:'reader@example.test',permissions:[{node:id,methods:'fixture.check'}]});

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
-import { Store } from '../src/store.ts';
+import { normalizeCreateTeamData, Store } from '../src/store.ts';
 
 test('workspace and durable nodes, defaults, email uniqueness, admin recovery', (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'pappai-store-'));
@@ -124,14 +124,83 @@ test('membership composes grants through the TEAM and preserves restrictions on 
   store.setStatus(user.id,'working');
   const check=(data:unknown)=>store.allows(user.id,target.id,'data.save',data);
   assert.equal(check(1),false);
-  store.manage(admin.id,other.id,'$.team.members.add',{appId:user.id});
+  const change=(method:string)=>store.manage(admin.id,other.id,method,{memberId:user.id}).changed;
+  assert.equal(change('$.team.members.add'),true);
+  assert.equal(change('$.team.members.add'),false);
+  assert.deepEqual(store.permissionSubjects(other.id),[user.id]);
+  assert.deepEqual(store.permissionSubjects(home.id),[user.id]);
+  assert.deepEqual(new Set(store.permissionSubjects()),new Set([admin.id,target.id,user.id]));
+  assert.deepEqual(store.manage(admin.id,user.id,'$.memberships.list',{}).result,[other.id]);
+  assert.deepEqual(store.manage(admin.id,other.id,'$.team.members.list',{}).result,[user.id]);
   assert.equal(check(1),true);
   assert.equal(check('string'),false);
   assert.equal(store.selects(other.id,user.id,'./&'),true);
   assert.equal(store.allowsFile(user.id,'/shared/input'),true);
   assert.equal(store.allowsFile(user.id,'/shared/input',true),false);
   assert.equal(store.isAdmin(user.id),false);
-  store.manage(admin.id,user.id,'$.app.memberships.delete',{teamId:other.id});
+  assert.equal(store.manage(admin.id,user.id,'$.app.memberships.delete',{teamId:other.id}).handled,false);
+  assert.equal(change('$.team.members.remove'),true);
+  assert.equal(change('$.team.members.remove'),false);
+  assert.deepEqual(store.permissionSubjects(other.id),[]);
   assert.equal(check(1),false);
   assert.equal(store.allowsFile(user.id,'/shared/input'),false);
+});
+
+test('TEAM defaults delegate creation on the team and node management below it', t=>{
+  const db=new DatabaseSync(':memory:'); t.after(()=>db.close());
+  const store=new Store(db), settings={name:'branch'};
+  const team=store.create('~','team',settings);
+  assert.deepEqual(team.permissions,normalizeCreateTeamData(settings).permissions);
+  const user=store.create(team.id,'user',{name:'manager',email:'manager@example.test',permissions:null});
+  store.setStatus(user.id,'working');
+  for (const type of ['Team','User','App','Profile']) assert.ok(store.allows(user.id,team.id,'$.children.create'+type));
+  assert.equal(store.allows(user.id,team.id,'$.permissions.set'),false);
+  assert.equal(store.allows(user.id,team.id,'$.team.members.add'),false);
+  assert.equal(store.allows(user.id,user.id,'$.permissions.set'),true);
+  assert.equal(store.allows(user.id,'~','$.children.createTeam'),false);
+  assert.equal(store.allowsCli(user.id,user.id,'shell',{}),true);
+  assert.equal(store.allowsEvent(user.id,user.id,'update'),true);
+  assert.equal(store.canDiscover(user.id,user.id),true);
+  assert.equal(store.hasHttp(user.id),false);
+  assert.equal(store.allowsFile(user.id,'/private/report'),false);
+  assert.equal(store.sandbox(user.id)?.network,false);
+  for (const permissions of [null,[],[{read:'/data'}]]) {
+    assert.deepEqual(store.create('~','team',{name:'custom',permissions}).permissions,permissions);
+  }
+});
+
+test('local permission changes respect rule order and ignore object key order', t=>{
+  const db=new DatabaseSync(':memory:'); t.after(()=>db.close());
+  const store=new Store(db), owner=store.ensureAdmin('owner@example.test');
+  const profile=store.create('~','profile',{name:'profile',scope:[true]});
+  const manage=(method:string,data={})=>store.manage(owner.id,profile.id,method,data);
+  const rules=[{node:'.',methods:true},{read:'/work'}];
+  assert.equal(manage('$.permissions.set',{permissions:rules}).changed,true);
+  assert.equal(manage('$.permissions.set',{permissions:[{methods:true,node:'.'},{read:'/work'}]}).changed,false);
+  assert.equal(manage('$.permissions.set',{permissions:rules.reverse()}).changed,true);
+  assert.deepEqual(manage('$.permissions.get').result,{permissions:rules});
+  assert.deepEqual(manage('$.profile.scope.get').result,{scope:[true]});
+  store.setStatus(profile.id,'working');
+  const summary={id:profile.id,parentId:'~',name:'profile',type:'profile',status:'working'};
+  assert.deepEqual(manage('$.node.get').result,summary);
+  assert.deepEqual(store.visible(owner.id).find(n=>n.id===profile.id),summary);
+});
+
+test('membership writes authorize the selected member on the receiving TEAM', t=>{
+  const db=new DatabaseSync(':memory:'); t.after(()=>db.close());
+  const store=new Store(db);
+  const team=store.create('~','team',{name:'target'});
+  const profile=store.create('~','profile',{name:'profile'});
+  const permissions=[{node:team.id,methods:{'$.team.members.*':{
+    type:'object',required:['memberId'],properties:{memberId:{const:profile.id}}
+  }}}];
+  const user=store.create('~','user',{name:'operator',email:'operator@example.test',permissions});
+  store.setStatus(user.id,'working');
+  for (const op of ['add','remove']) {
+    const manage=(data:unknown)=>store.manage(user.id,team.id,'$.team.members.'+op,data);
+    assert.throws(()=>manage({memberId:user.id}),/Permission denied/);
+    assert.throws(()=>manage({appId:profile.id}),/Permission denied/);
+    assert.equal(manage({memberId:profile.id}).changed,true);
+  }
+  assert.equal(store.get(profile.id)?.parentId,'~');
 });

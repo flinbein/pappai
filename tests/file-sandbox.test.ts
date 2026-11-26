@@ -70,7 +70,7 @@ test('two network-isolated process APP exchange binary files using their private
             isolated:!fs.existsSync('/tmp/received')};
         }`,'send')});
     for (const node of [callee,caller])
-      await svc.controller.call(admin.id,{node:node.id,method:'$.app.start'});
+      await svc.controller.call(admin.id,{node:node.id,method:'$.lifecycle.start'});
     assert.deepEqual(await svc.controller.call(admin.id,{node:caller.id,method:'send',
       data:{node:callee.id},timeoutMs:12000}),{count:4,match:true,isolated:true});
   });

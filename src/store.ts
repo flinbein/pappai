@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
+import { isDeepStrictEqual } from 'node:util';
 import { allowsAtLevel, filesystemProfile, fileLevel, networkAllowed, selectsNode, validNodes, validateSchemaSelector, validatePermissions } from './permits.ts';
 import type { Capability, NodeType, Permissions, Rule } from './permits.ts';
 
@@ -23,6 +24,14 @@ type NodeSettings = {name: string; email?: string; permissions?: unknown; manife
 type SqlNode = Omit<NodeRecord,'permissions'|'manifest'|'scope'> & {permissions: string; manifest: string | null; scope?: string | null};
 export type DirectoryEntry = Pick<NodeRecord,'id'|'parentId'|'type'|'name'> & {status?: NodeStatus};
 type PolicyNode = Pick<NodeRecord,'id'|'parentId'|'type'|'name'|'status'|'permissions'>;
+
+export function normalizeCreateTeamData(data: NodeSettings) {
+  if (data.permissions !== undefined) return data;
+  return {...data, permissions: [
+    {node:'./**', methods:true, cli:true, events:true, delivery:true, discover:true},
+    {node:'.', methods:['$.children.createTeam','$.children.createUser','$.children.createApp','$.children.createProfile']},
+  ]};
+}
 
 function decode(row: SqlNode): NodeRecord {
   const {scope,...fields}=row;
@@ -123,7 +132,7 @@ export class Store {
     if (typeof settings?.name !== 'string' || !settings.name.trim() || settings.name.length > 255) {
       throw new Error('Name required (up to 255 characters)');
     }
-    const permissions = settings.permissions === undefined ? [] : settings.permissions;
+    const {permissions = []} = type === 'team' ? normalizeCreateTeamData(settings) : settings;
     validatePermissions(permissions);
     const email = type === 'user' ? emailKey(settings.email) : null;
     if (type !== 'user' && settings.email !== undefined) throw new Error('Only users have an email');
@@ -159,9 +168,9 @@ export class Store {
 
   setStatus(id: string, status: NodeStatus, issue?: string): NodeRecord {
     const row = this.db.prepare(`
-      UPDATE nodes SET status=?,lastIssue=COALESCE(?, lastIssue) WHERE id=? AND type IN ('user','app') RETURNING *
+      UPDATE nodes SET status=?,lastIssue=COALESCE(?, lastIssue) WHERE id=? AND type IN ('user','app','profile') RETURNING *
     `).get(status, issue ?? null, id);
-    if (!row) throw new Error('No such APP or USER');
+    if (!row) throw new Error('No such APP, USER or PROFILE');
     return decode(row as SqlNode);
   }
 
@@ -177,6 +186,23 @@ export class Store {
 
   eventRecipients(): NodeRecord[] {
     return this.db.prepare("SELECT * FROM nodes WHERE type IN ('app','user') ORDER BY rowid").all().map(row=>decode(row as SqlNode));
+  }
+
+  permissionSubjects(ownerId?: string): string[] {
+    const subjects = "SELECT id FROM nodes WHERE type IN ('app','user','profile')";
+    // A membership change can also alter target selectors inside unrelated principals' rules.
+    if (ownerId === undefined) return this.db.prepare(subjects).all().map(row=>String(row.id));
+    const rows = this.db.prepare(`
+      WITH RECURSIVE branch(id) AS (
+        SELECT id FROM nodes WHERE id=?
+        UNION ALL SELECT child.id FROM nodes child JOIN branch ON child.parentId=branch.id
+      )
+      ${subjects} AND (
+        id IN (SELECT id FROM branch) OR
+        id IN (SELECT member FROM team_members WHERE team IN (SELECT id FROM branch))
+      )
+    `).all(ownerId);
+    return rows.map(row=>String(row.id));
   }
 
   workingApps(): NodeRecord[] {
@@ -311,48 +337,48 @@ export class Store {
     this.db.prepare('INSERT INTO http_names VALUES(?,?) ON CONFLICT(node) DO UPDATE SET name=excluded.name').run(id,name);
   }
   managementNames(type:NodeType) {
-    const names=type==='workspace'?[]:['$.node.permissions.get','$.node.permissions.set'];
-    if(type==='team') names.push(...['list','add','delete'].map(op=>'$.team.members.'+op));
-    if(type==='app'||type==='user'||type==='profile') names.push(...['list','add','delete'].map(op=>'$.app.memberships.'+op));
+    const names=type==='workspace'?[]:['$.node.get','$.permissions.get','$.permissions.set'];
+    if(type==='team') names.push('$.team.members.list','$.team.members.add','$.team.members.remove');
+    if(type==='app'||type==='user'||type==='profile') names.push('$.memberships.list');
     if(type==='app') names.push('$.app.http.get','$.app.http.set','$.app.profile.set');
-    if(type==='profile') names.push('$.profile.get','$.profile.scope.set','$.profile.enable','$.profile.disable');
+    if(type==='profile') names.push('$.profile.scope.get','$.profile.scope.set');
     return names;
   }
-  manage(actorId:string,id:string,method:string,data:any): {handled:boolean;result?:any} {
+  manage(actorId:string,id:string,method:string,data:any): {handled:boolean;result?:any;changed?:boolean} {
     const node=this.get(id);
     if(!node || !this.managementNames(node.type).includes(method)) return {handled:false};
     if(!this.allows(actorId,id,method,data)) throw Error('Permission denied');
     let result:any={};
-    if (method==='$.profile.get') result={scope:node.scope,status:node.status};
+    let changed:boolean|undefined;
+    if (method==='$.node.get') result={id,parentId:node.parentId,type:node.type,name:node.name,status:node.status};
+    else if (method==='$.profile.scope.get') result={scope:node.scope};
     else if(method==='$.profile.scope.set') {
       if (!Array.isArray(data.scope) || !validNodes(data.scope)) throw Error('Invalid profile scope');
       this.db.prepare('UPDATE nodes SET scope=? WHERE id=?').run(JSON.stringify(data.scope),id);
-    } else if(method==='$.profile.enable' || method==='$.profile.disable') {
-      this.db.prepare('UPDATE nodes SET status=? WHERE id=?').run(method.endsWith('enable')?'working':'stopped',id);
     } else if(method==='$.app.profile.set') {
       if (data.profile!==null && (typeof data.profile!=='string' || this.get(data.profile)?.type!=='profile'))
         throw Error('Invalid APP profile');
       this.db.prepare('UPDATE nodes SET profile=? WHERE id=?').run(data.profile,id);
-    } else if (method==='$.node.permissions.get') result={permissions:node.permissions};
-    else if(method==='$.node.permissions.set') {
+    } else if (method==='$.permissions.get') result={permissions:node.permissions};
+    else if(method==='$.permissions.set') {
       validatePermissions(data.permissions);
-      this.db.prepare('UPDATE nodes SET permissions=? WHERE id=?').run(JSON.stringify(data.permissions),id);
+      changed=!isDeepStrictEqual(data.permissions,node.permissions);
+      if (changed) this.db.prepare('UPDATE nodes SET permissions=? WHERE id=?').run(JSON.stringify(data.permissions),id);
     } else if(method==='$.app.http.get') result={name:node.httpName};
     else if(method==='$.app.http.set') this.setHttpName(id,data.name);
-    else {
-      const onTeam=node.type==='team';
-      if(method.endsWith('.list')) {
-        result=this.db.prepare(onTeam?'SELECT member AS id FROM team_members WHERE team=? ORDER BY member':
-          'SELECT team AS id FROM team_members WHERE member=? ORDER BY team').all(id).map(r=>r.id);
-      } else {
-        const team=onTeam?id:data.teamId, member=onTeam?data.appId:id;
-        if(typeof team!=='string'||typeof member!=='string'||this.get(team)?.type!=='team'||
-          !['app','user','profile'].includes(this.get(member)?.type??'')) throw Error('Expected TEAM and APP or USER');
-        if(method.endsWith('.add')) this.db.prepare('INSERT OR IGNORE INTO team_members VALUES(?,?)').run(team,member);
-        else this.db.prepare('DELETE FROM team_members WHERE team=? AND member=?').run(team,member);
+    else if(method==='$.team.members.list' || method==='$.memberships.list') {
+      result=this.db.prepare(node.type==='team'?'SELECT member AS id FROM team_members WHERE team=? ORDER BY member':
+        'SELECT team AS id FROM team_members WHERE member=? ORDER BY team').all(id).map(r=>r.id);
+    } else if(method==='$.team.members.add' || method==='$.team.members.remove') {
+      const member=data.memberId;
+      if(typeof member!=='string' || !['app','user','profile'].includes(this.get(member)?.type??'')) {
+        throw Error('Expected an APP, USER or PROFILE memberId');
       }
+      const query=method==='$.team.members.add'?'INSERT INTO team_members(team,member) VALUES(?,?) ON CONFLICT DO NOTHING':
+        'DELETE FROM team_members WHERE team=? AND member=?';
+      changed=!!this.db.prepare(query).run(id,member).changes;
     }
-    return {handled:true,result};
+    return {handled:true,result,...(changed!==undefined && {changed})};
   }
 
   visible(actorId: string): DirectoryEntry[] {
@@ -372,7 +398,7 @@ export class Store {
       if(!owners.some(path=>path.every(o=>allowsAtLevel(o.rules,o.ids,ids,node.type,actorId,undefined,'discover',undefined,undefined,this.member)))) continue;
       for(const n of chain.reverse()) if(!entries.has(n.id)) {
         const {id,parentId,type,name,status}=n;
-        entries.set(id,{id,parentId,type,name,...(['app','user'].includes(type)?{status}:{})});
+        entries.set(id,{id,parentId,type,name,...(['app','user','profile'].includes(type)?{status}:{})});
       }
     }
     return [...entries.values()];

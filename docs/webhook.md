@@ -9,13 +9,13 @@ Choose `call` in the panel and create the example APP. Replace the example secre
 ```json
 {
   "node": "~",
-  "method": "$.app.create",
+  "method": "$.children.createApp",
   "data": {
     "name": "Webhook",
     "httpName": "telegram-demo",
     "permissions": [
       {"read": "/opt/pappai/examples/webhook", "http": true},
-      {"node": ".", "events": ["$.app.statusChanged","$.app.restarted","$.app.executor.failed"]},
+      {"node": ".", "events": ["$.lifecycle.statusChanged","$.app.restarted","$.app.executors.failed"]},
       {"node": "~", "events": "$.workspace.init"}
     ],
     "source": {

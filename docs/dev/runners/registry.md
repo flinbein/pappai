@@ -1,10 +1,10 @@
 # Runner registry
 
-Manage runners through workspace methods (`node: "~"`). The caller must be a running APP or a USER with an unrestricted permission chain. Runner code executes with the controller's privileges. Install only trusted modules and keep their files accessible after container restarts.
+Manage runners through workspace methods (`node: "~"`). The caller must be a working APP or USER with an unrestricted permission chain and a permit for the method on the workspace. Runner code executes with the controller's privileges. Install only trusted modules and keep their files accessible after container restarts.
 
 | Method | Result |
 |---|---|
-| `$.runners.get({})` | Lists installed names, active and previous entrypoints, preparation source (when available), settings schema, enabled state and availability. |
+| `$.runners.list({})` | Lists installed names, active and previous entrypoints, preparation source (when available), settings schema, enabled state and availability. |
 | `$.runners.add({name,entrypoint})` | Starts a module inside its named private directory and registers its declared contract after the host reports readiness. |
 | `$.runners.restart({name,entrypoint?})` | Stops the old workers and waits for the selected host to become ready. A failed replacement restarts the previous working version. A successful restart publishes `$.app.restarted` for affected running APPs. |
 | `$.runners.disable({name})` | Stops the runner and moves affected running APPs to `error`. |

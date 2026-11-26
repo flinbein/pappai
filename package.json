@@ -14,7 +14,7 @@
     "test": "node --test tests/*.test.ts"
   },
   "dependencies": {
-    "@flinbein/pappai-web": "0.1.23",
+    "@flinbein/pappai-web": "0.1.24",
     "@simplewebauthn/server": "^13.0.0",
     "ajv": "^8.17.1",
     "ajv-formats": "^3.0.1",

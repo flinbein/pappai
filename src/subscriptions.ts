@@ -69,11 +69,11 @@ export function changeSubscriptions(existing: any[], action: string, data: any):
     }
     next = [...existing.slice(0,offset),...subscriptions,...existing.slice(offset)];
   } else {
-    if (!['enable','disable','delete'].includes(action)) throw Error('Unknown subscription operation');
+    if (!['enable','disable','remove'].includes(action)) throw Error('Unknown subscription operation');
     if (!Array.isArray(data.ids) || data.ids.some((id:unknown) => !existing.some(rule => rule.id === id)))
       throw Error('Subscription not found');
     const ids = new Set(data.ids);
-    if (action === 'delete') next = existing.filter(rule => !ids.has(rule.id));
+    if (action === 'remove') next = existing.filter(rule => !ids.has(rule.id));
     else next = existing.map(rule => ids.has(rule.id) && (rule.enabled ?? true) !== (action === 'enable')
       ? {...rule,enabled:action === 'enable'} : rule);
   }

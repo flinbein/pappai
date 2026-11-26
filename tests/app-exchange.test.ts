@@ -58,8 +58,8 @@ test('a subscribed persistent process calls the publisher while both of its oneS
       else if(m.method==='result'){ waiting.push(m.id);reply(); }
     });
   `,{mode:'persistent'},[{node:publisher,events:'work'}]));
-  await call(subscriber,'$.app.start');
-  await call(publisher,'$.app.start');
+  await call(subscriber,'$.lifecycle.start');
+  await call(publisher,'$.lifecycle.start');
   const started = [];
   runner.on('started',job=>started.push(job));
   const accepted = call(publisher,'start',{subscriber,payload:{text:'hello'}});
@@ -68,7 +68,7 @@ test('a subscribed persistent process calls the publisher while both of its oneS
   assert.deepEqual(await accepted,{text:'hello'});
   assert.equal(started.filter(w=>w.appId === publisher).length,2);
   assert.equal(started.filter(w=>w.appId === subscriber).length,1);
-  await call(subscriber,'$.app.stop');
+  await call(subscriber,'$.lifecycle.stop');
 });
 
 test('personal rules are atomic, survive restart and cannot bypass event permits',async t=>{
@@ -76,25 +76,25 @@ test('personal rules are atomic, survive restart and cannot bypass event permits
   const source = app('source',manifest({work:event}));
   const recipient = app('receiver',manifest({}),[{node:source,events:'work'}]);
   const hidden = app('hidden',manifest({}),[]);
-  await Promise.all([source,recipient,hidden].map(id=>call(id,'$.app.start')));
+  await Promise.all([source,recipient,hidden].map(id=>call(id,'$.lifecycle.start')));
   const rule = {id:'$first',node:source,events:{work:{type:'integer'}}};
-  for(const id of [recipient,hidden]) await call(id,'$.node.subscriptions.add',{subscriptions:[rule]});
-  await assert.rejects(call(recipient,'$.node.subscriptions.add',{subscriptions:[rule]}),/duplicate/i);
-  await assert.rejects(call(recipient,'$.node.subscriptions.delete',{ids:[rule.id,'missing']}),/not found/i);
-  assert.deepEqual((await call(recipient,'$.node.subscriptions.get')).subscriptions,[rule]);
+  for(const id of [recipient,hidden]) await call(id,'$.subscriptions.add',{subscriptions:[rule]});
+  await assert.rejects(call(recipient,'$.subscriptions.add',{subscriptions:[rule]}),/duplicate/i);
+  await assert.rejects(call(recipient,'$.subscriptions.remove',{ids:[rule.id,'missing']}),/not found/i);
+  assert.deepEqual((await call(recipient,'$.subscriptions.get')).subscriptions,[rule]);
   const restored = new Controller(store,runner);
   restored.publish(source,{event:'work',data:'ignored'});
   restored.publish(source,{event:'work',data:1});
   assert.deepEqual(runner.jobs.map(j=>[j.appId,j.event,j.subscription]),[[recipient,'work','$first']]);
-  assert.throws(()=>ctrl.publish(source,{event:'$.app.statusChanged'}),/publication/i);
+  assert.throws(()=>ctrl.publish(source,{event:'$.lifecycle.statusChanged'}),/publication/i);
 });
 
 test('persistent transport waits for stdin completion and preserves queued work through restart', async t=>{
   const {runner,app,call} = setup(t);
-  const id = app('service',manifest({work:method},'',{mode:'persistent'},[{node:'.',events:'$.app.statusChanged'}]));
-  await call(id,'$.app.start');
+  const id = app('service',manifest({work:method},'',{mode:'persistent'},[{node:'.',events:'$.lifecycle.statusChanged'}]));
+  await call(id,'$.lifecycle.start');
   const first = runner.jobs[0];
-  assert.equal(first.event,'$.app.statusChanged');
+  assert.equal(first.event,'$.lifecycle.statusChanged');
   const pending = call(id,'work');
   assert.equal(runner.writes.length,0);
   await call(id,'$.app.restart');
@@ -113,7 +113,7 @@ test('persistent transport waits for stdin completion and preserves queued work 
 test('shared bounded queue evicts oldest minimum priority and preserves FIFO ties', async t=>{
   const {runner,app,call} = setup(t);
   const id = app('worker',manifest({low:method,high:{...method,priority:10,canEvict:true}},'',{mode:'oneShot',poolSize:1}));
-  await call(id,'$.app.start');
+  await call(id,'$.lifecycle.start');
   const results = Promise.allSettled(Array.from({length:101},(_,index)=>call(id,'low',{index})));
   await assert.rejects(call(id,'low'),/full/i);
   const urgent = call(id,'high');
@@ -124,7 +124,7 @@ test('shared bounded queue evicts oldest minimum priority and preserves FIFO tie
   assert.equal(await urgent,'ok');
   runner.emit('exit',runner.jobs[1]);
   assert.equal(runner.jobs[2].data.index,2);
-  await call(id,'$.app.stop');
+  await call(id,'$.lifecycle.stop');
   runner.emit('exit',runner.jobs[2]);
   const settled = await results;
   assert.match(settled[1].reason.message,/evicted/i);
@@ -133,20 +133,20 @@ test('shared bounded queue evicts oldest minimum priority and preserves FIFO tie
 test('oneShot launch failure withdraws sibling reservations while an accepted call can still reply',async t=>{
   const {runner,app,call}=setup(t);
   const id=app('pool',manifest({work:method},'',{mode:'oneShot',poolSize:3}));
-  await call(id,'$.app.start');
+  await call(id,'$.lifecycle.start');
   const settled=Promise.allSettled([call(id,'work'),call(id,'work'),call(id,'work'),call(id,'work')]);
   const [accepted,failed,stale]=runner.jobs;
   runner.emit('started',accepted);
   runner.emit('written',{appId:id,workerId:accepted.id,id:accepted.id});
   runner.emit('exit',{...failed,startFailed:true,issue:'launch failed'});
   assert.deepEqual(runner.stops,[stale.id]);
-  assert.equal((await call(id,'$.app.get')).status,'error');
-  await call(id,'$.app.start');
+  assert.equal((await call(id,'$.lifecycle.get')).status,'error');
+  await call(id,'$.lifecycle.start');
   runner.emit('started',stale);
   runner.emit('exit',{...stale,startFailed:true,issue:'stale failure'});
   runner.emit('reply',{...accepted,result:42});
   runner.emit('exit',accepted);
-  assert.equal((await call(id,'$.app.get')).status,'working');
+  assert.equal((await call(id,'$.lifecycle.get')).status,'working');
   assert.deepEqual((await settled).map(r=>r.status==='fulfilled'?r.value:r.reason.message),
     [42,'launch failed','launch failed','launch failed']);
   assert.equal(runner.writes.length,1);
@@ -154,35 +154,35 @@ test('oneShot launch failure withdraws sibling reservations while an accepted ca
 
 test('persistent failure retains waiting work until retries are exhausted; manual start resets count',async t=>{
   const {runner,app,call}=setup(t);
-  const id=app('service',manifest({work:method},'',{mode:'persistent',maxRestarts:1},[{node:'.',events:'$.app.executor.failed'}]));
-  await call(id,'$.app.start');
+  const id=app('service',manifest({work:method},'',{mode:'persistent',maxRestarts:1},[{node:'.',events:'$.app.executors.failed'}]));
+  await call(id,'$.lifecycle.start');
   const first=call(id,'work');
   const next=call(id,'work');
   const assigned=runner.jobs[0];
   runner.emit('started',assigned);
   runner.emit('exit',{...assigned,issue:'crash'});
   await assert.rejects(first,/crash/);
-  assert.equal((await call(id,'$.app.get')).status,'working');
+  assert.equal((await call(id,'$.lifecycle.get')).status,'working');
   const retry=runner.jobs[1];
   assert.equal(retry.method,'work');
   runner.emit('started',retry);
   runner.emit('exit',{...retry,issue:'crash again'});
   await assert.rejects(next,/crash again/);
-  assert.equal((await call(id,'$.app.get')).status,'error');
+  assert.equal((await call(id,'$.lifecycle.get')).status,'error');
   assert.equal((await call(id,'$.app.executors.get')).queued,0);
-  await call(id,'$.app.start');
+  await call(id,'$.lifecycle.start');
   const fresh=call(id,'work');
   runner.emit('exit',{...runner.jobs[2],issue:'new crash'});
   await assert.rejects(fresh,/crash/);
-  assert.equal((await call(id,'$.app.get')).status,'working');
-  assert.equal(runner.jobs[3].event,'$.app.executor.failed');
+  assert.equal((await call(id,'$.lifecycle.get')).status,'working');
+  assert.equal(runner.jobs[3].event,'$.app.executors.failed');
 });
 
 test('loss of a retired runner frees its slot without failing the new runner of the same APP',async t=>{
   const {runner,ctrl,app,call}=setup(t);
   const old=manifest({work:method},'',{mode:'oneShot',poolSize:1});
   const id=app('migrated',old);
-  await call(id,'$.app.start');
+  await call(id,'$.lifecycle.start');
   const first=call(id,'work');
   runner.emit('started',runner.jobs[0]);
   const next=structuredClone(old);
@@ -191,7 +191,7 @@ test('loss of a retired runner frees its slot without failing the new runner of 
   const second=call(id,'work');
   runner.emit('lost','old runner disconnected','process');
   await assert.rejects(first,/disconnected/);
-  assert.equal((await call(id,'$.app.get')).status,'working');
+  assert.equal((await call(id,'$.lifecycle.get')).status,'working');
   assert.equal(runner.jobs[1].runnerType,'next');
   runner.emit('reply',{...runner.jobs[1],result:'new'});
   assert.equal(await second,'new');
@@ -201,14 +201,14 @@ test('an authenticated executor can complete an outgoing method during graceful 
   const {store,runner,app,call,ctrl}=setup(t);
   const caller=app('caller',manifest({work:method}));
   const callee=app('callee',manifest({work:method}));
-  await call(caller,'$.app.start');
-  await call(callee,'$.app.start');
+  await call(caller,'$.lifecycle.start');
+  await call(callee,'$.lifecycle.start');
   const pending=call(caller,'work');
   const original=runner.jobs[0];
   runner.emit('started',original);
   const opened=[];
   ctrl.hooks.callOpened=(...args)=>opened.push(args);
-  await call(caller,'$.app.stop');
+  await call(caller,'$.lifecycle.stop');
   assert.equal(store.get(caller).status,'stopping');
   await assert.rejects(ctrl.call(caller,{node:callee,method:'work'}),/permission/i);
   runner.emit('request',{appId:caller,workerId:original.id,id:'local',method:'call',params:{node:callee,method:'work'}});

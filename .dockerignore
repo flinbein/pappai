@@ -4,6 +4,7 @@
 !package.json
 !package-lock.json
 !src/*.ts
+!src/system-contract/*.ts
 !src/*.py
 !src/pappai
 !scripts/install-web.mjs

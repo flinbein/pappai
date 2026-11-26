@@ -235,7 +235,7 @@ export class ManifestSources {
     this.pending.clear();
   }
   system(actor: string,node: NodeRecord,method: string,data: any) {
-    if (['$.app.start','$.app.restart'].includes(method) && node.type === 'app') {
+    if (['$.lifecycle.start','$.app.forceStart','$.app.restart'].includes(method) && node.type === 'app') {
       if (!this.store.allows(actor,node.id,method,data)) throw Error('Permission denied');
       try { this.check(node); }
       catch (error) {
@@ -244,7 +244,7 @@ export class ManifestSources {
       }
       return {handled:false};
     }
-    if (method !== '$.app.create' && (node.type !== 'app' ||
+    if (method !== '$.children.createApp' && (node.type !== 'app' ||
         !['$.app.manifest.get','$.app.manifest.getApplied','$.app.manifest.set'].includes(method)))
       return {handled:false};
     if (!this.store.allows(actor,node.id,method,data)) throw Error('Permission denied');
@@ -253,7 +253,7 @@ export class ManifestSources {
       const result = mask({manifest:node.manifest}) as {manifest:any};
       return {handled:true,result:result.manifest};
     }
-    const create = method === '$.app.create';
+    const create = method === '$.children.createApp';
     const source = savedSource(data?.source,create ? undefined : this.source(node));
     const db = this.store.db;
     db.exec('SAVEPOINT update_manifest_source');
