@@ -326,8 +326,9 @@ async function checkSharedTerminal(owner, first, second, socket) {
     await viewer.evaluate(() => { window.takeRequests.length = 0; });
     const box = await target.boundingBox();
     await viewer.mouse.move(box.x+box.width/2,box.y+box.height/2);
+    // Model the press that raises the window. Waiting for paint here also
+    // models a user pausing on A long enough to activate it before pressing.
     await viewer.bringToFront();
-    await pauseForPaint(viewer);
     await viewer.mouse.down();
     await sleep(350); // The click can finish after the focus delay expires.
     await viewer.mouse.up();
@@ -420,7 +421,7 @@ async function checkSharedTerminal(owner, first, second, socket) {
   await active(viewer).waitFor();
   await viewer.evaluate(() => window.otherTerminalWindow.port.postMessage({type:'panel.detach'}));
   await viewer.reload();
-  await tab(firstId).click();
+  await tab(firstId).and(viewer.locator('[aria-selected=true]')).waitFor();
   await active(viewer).waitFor();
   await viewer.locator(frame+' .xterm-rows').getByText('newowner',{exact:true}).waitFor();
   await sendTerminalLine(viewer,"printf 'reload%s\\n' survived");
@@ -472,7 +473,15 @@ async function checkMethodLink(context, origin, app) {
   await page.locator('#method-result').filter({hasText:'bookmarked'}).waitFor();
   assert.equal(calls.length, 1);
   assert.deepEqual(calls[0].params.data, JSON.parse(draft));
+  await page.locator('.breadcrumbs button').first().click();
   await page.reload();
+  await page.locator('#workspace[data-pane=tree] [data-node="~"]').waitFor();
+  assert.equal(page.url(), url);
+  await page.locator('[data-node="~"]').click();
+  await page.waitForURL(origin+'/nodes/~');
+  await page.goBack();
+  await page.locator('#workspace[data-pane=tree]').waitFor();
+  await page.locator('.breadcrumbs button').nth(2).click();
   await form.waitFor();
   assert.equal(calls.length, 1);
   await page.setViewportSize({width:1280,height:800});
@@ -584,13 +593,30 @@ try {
     await admin.getByRole('button',{name:'Run',exact:true}).click();
     await assertTerminalState(admin.locator('.terminal-tab[data-terminal][aria-selected=true]'),'closed');
     await admin.locator('.terminal-frame:not([hidden]) .xterm-rows').getByText(/probe.verify/).first().waitFor();
+    const terminalId = await admin.locator('.terminal-tab[aria-selected=true]').getAttribute('data-terminal');
+    const selectedTerminal = admin.locator('.terminal-tab[data-terminal="'+terminalId+'"][aria-selected=true]');
+    await admin.setViewportSize({width:390,height:760});
+    await admin.locator('.breadcrumbs button').first().click();
+    await admin.reload();
+    await admin.locator('#workspace[data-pane=tree]').waitFor();
+    await admin.locator('.breadcrumbs button').last().click();
+    await selectedTerminal.waitFor();
+    await admin.locator('.terminal-frame:not([hidden]) .xterm-rows').getByText(/probe.verify/).first().waitFor();
+    await admin.setViewportSize({width:1280,height:800});
     await admin.locator('#nav-terminal').click();
     const group=admin.locator('[data-cli-group]');
     await group.waitFor();
-    if (await group.getAttribute('aria-expanded')==='true') await group.click();
+    if (await group.getAttribute('aria-expanded')!=='true') await group.click();
+    await selectedTerminal.click();
+    await admin.reload();
+    await selectedTerminal.waitFor();
+    assert.equal(await group.getAttribute('aria-expanded'),'true');
+    await group.click();
+    await admin.reload();
+    await admin.locator('#new-terminal[aria-selected=true]').waitFor();
     await admin.locator('[data-close-group]').click();
     await group.waitFor({state:'detached'});
-    console.log('PASS: PROFILE CLI launch in a real PTY, terminal RPC and shared group');
+    console.log('PASS: PROFILE CLI launch, mobile pane restoration, closed PTY history, expanded terminal group and [+] across reload');
   }
   const observer = await observePanel(admin.context(), origin);
   const {id:team} = await call("~","$.children.createTeam",{name:"Acceptance",permissions:null});

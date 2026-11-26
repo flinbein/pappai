@@ -51,9 +51,8 @@ export async function exerciseRunnerInstaller(page, exec, detached, codex, captu
   detached('python3','-m','http.server','19872','--bind','127.0.0.1','--directory',dir);
 
   await page.locator('[data-node="~"]').click();
-  const install = page.locator('[data-action="methods/%24.runners.add"]');
-  if (!await install.isVisible()) await page.getByRole('button',{name:'Expand $.runners',exact:true}).click();
-  await install.click();
+  await page.getByRole('link', {name:'Manage runners',exact:true}).click();
+  await page.waitForURL('**/nodes/~/runners');
   await page.locator('#runner-source').fill(pkg+'@1.0.0');
   assert.equal(await page.locator('#runner-name').inputValue(), name);
   let terminalOutput = '';
@@ -127,9 +126,13 @@ export async function exerciseCodexPanel(page, exec, detached) {
   await fill('arguments','{invalid');
   await page.locator('#method-call button').click();
   await page.getByText(/Invalid JSON/).waitFor();
-  await page.locator('#feature').selectOption('$.lifecycle.statusChanged');
+  const featurePanel = page.getByRole('navigation', {name:'Documentation'});
+  const lifecycle = featurePanel.getByRole('button', {name:'Expand $.lifecycle',exact:true});
+  if (await lifecycle.isVisible()) await lifecycle.click();
+  await featurePanel.locator('[data-action="methods/%24.lifecycle.statusChanged"]').click();
+  await page.locator('#feature-description').filter({hasText:'event'}).waitFor();
   assert.equal(await page.locator('#method-call').isVisible(), false);
-  await page.locator('#feature').selectOption('agent.getHistory');
+  await featurePanel.locator('[data-action="methods/agent.getHistory"]').click();
   await page.locator('#method-call button').click();
   await page.waitForFunction(() => document.querySelector('#method-result').textContent.includes('panel greeting'));
   await page.setViewportSize({width:375,height:750});
