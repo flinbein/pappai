@@ -26,22 +26,23 @@ async function body(req: IncomingMessage) {
   }
   return JSON.parse(Buffer.concat(buffers).toString('utf8'));
 }
-export function createService({ db, origin, webRoot = process.env.PAPPAI_WEB_ROOT }: {
-  db: DatabaseSync; origin: string; webRoot?: string;
+export function createService({ db, origin, webRoot = process.env.PAPPAI_WEB_ROOT, runnerRoot }: {
+  db: DatabaseSync; origin: string; webRoot?: string; runnerRoot?:string;
 }) {
   const address = new URL(origin);
   const store = new Store(db);
   store.recoverInterruptedStops();
   const auth = createAuth(db, origin);
   initTempRoot();
-  const runner = new RunnerRegistry(store);
+  const runner = new RunnerRegistry(store,runnerRoot);
   const files = new FileDelegations(store);
   const sockets = new AppHttpSockets();
   let sources: ManifestSources;
   const controller = new Controller(store, runner, {
     executorStart(job) {
-      const fileSocket=files.socketFor(job.id,job.appId,job.runnerType==='codex');
-      if (fileSocket && job.runnerType!=='codex') {
+      const codex=runner.isCodex(job.runnerType ?? 'process');
+      const fileSocket=files.socketFor(job.id,job.appId,codex);
+      if (fileSocket && !codex) {
         const destination='/run/pappai/files';
         if (job.sandbox) (job.runtimeMounts ??= []).push({source:fileSocket,target:destination,readonly:true});
         job.settings={...job.settings,env:{...job.settings.env,PAPPAI_FILES_SOCKET:job.sandbox ? destination : fileSocket}};
@@ -60,6 +61,9 @@ export function createService({ db, origin, webRoot = process.env.PAPPAI_WEB_ROO
     executorRequest:files.executorRequest.bind(files),
     manifestChanged:id=>sources.manifestChanged(id), beforeRestart:id=>sources.applyPending(id),
     profileFeatures:()=>runner.profileFeatures(),
+    workspaceFeatures:()=>runner.workspaceFeatures(),
+    workspaceCall:(...args)=>runner.workspaceCall(...args),
+    isCodex:name=>runner.isCodex(name),
     profileCall:(...args)=>runner.profileCall(...args),
     systemNames:type=>type==='workspace'?registryMethods:type==='user'?['$.user.recovery.send']:[],
     system(actor,node,method,data) {
@@ -86,8 +90,10 @@ export function createService({ db, origin, webRoot = process.env.PAPPAI_WEB_ROO
     created:id=>controller.emitSystem(id,'$.node.created',{status:'stopped'}),
   });
   runner.on('restarted',name=>controller.runnerRestarted(name));
-  sources.restore();
-  controller.emitSystem('~','$.workspace.init',{});
+  const initialized=runner.initialized.then(()=>{
+    sources.restore();
+    controller.emitSystem('~','$.workspace.init',{});
+  });
   const template=process.env.PAPPAI_APP_HOST_TEMPLATE;
   const routeApp=template && createAppHttpRouter(template,address.host,name=>{
     const app=store.getByHttpName(name);
@@ -197,10 +203,11 @@ export function createService({ db, origin, webRoot = process.env.PAPPAI_WEB_ROO
     controller.shutdown();
     server.closeAllConnections();
     await Promise.all([runner.close(), terminals.close(), auth.close()]);
+    files.close();
     sockets.close();
     await closed;
   }
-  return { server, store, controller, runner, close };
+  return { server, store, controller, runner, initialized, close };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
@@ -210,6 +217,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   mkdirSync(dirname(file), { recursive: true });
   const db = new DatabaseSync(file);
   const app = createService({ db, origin });
+  await app.initialized;
   app.server.listen(port, process.env.HOST ?? '127.0.0.1', () => console.log('pappai', origin));
   let stopping = false;
   async function shutdown() {

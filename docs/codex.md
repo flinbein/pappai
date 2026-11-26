@@ -1,6 +1,6 @@
 # Run a Codex APP
 
-Install the [runner package and CLI distribution](https://github.com/flinbein/pappai-runner-codex#installation). Register the runner on the workspace with `$.runners.add`, which requires unrestricted permissions. Mount a dedicated persistent volume at `/run/pappai/private` for profile credentials and runner state.
+As an administrator, open **Add runner** on the workspace, select **npm** and install `@flinbein/pappai-runner-codex` as `codex`. The first launch installs the native Codex CLI. Check its progress through the workspace method `runners.codex.getVersion`. Mount a persistent volume at `/run/pappai/private` for installed code, profile credentials and runner state. [Installation and updates](dev/runners/install.md)
 
 ## From the web panel
 

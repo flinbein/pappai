@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { pathToFileURL } from 'node:url';
 import test from 'node:test';
 import { createService } from '../src/server.ts';
 
@@ -63,15 +64,20 @@ test('installed Codex package imports an authorized profile and handles typed wo
   t.after(()=>{model.closeAllConnections();model.close();});
   const port=(model.address() as {port:number}).port;
   const db=new DatabaseSync(':memory:');
-  const service=createService({db,origin:'http://localhost'});
+  const runnerRoot=join(root,'runners');
+  const service=createService({db,origin:'http://localhost',runnerRoot});
   t.after(async()=>{await service.close();db.close();});
   const admin=service.store.ensureAdmin('operator@example.test');
   const call=(node:string,method:string,data:unknown={})=>service.controller.call(admin.id,{node,method,data,timeoutMs:15000});
   const profilesDir=join(root,'profiles');
   await mkdir(profilesDir,{mode:0o700});
-  await call('~','$.runners.add',{name:'codex',entrypoint:process.env.PAPPAI_TEST_CODEX_ENTRYPOINT,
-    config:{codexExecutablePath:process.env.PAPPAI_TEST_CODEX_CLI,profilesDir,stateDir:join(root,'state'),
-      modelBaseUrl:'http://127.0.0.1:'+port+'/v1'}});
+  const config={codexExecutablePath:process.env.PAPPAI_TEST_CODEX_CLI,profilesDir,stateDir:join(root,'state'),
+    modelBaseUrl:'http://127.0.0.1:'+port+'/v1'};
+  const entrypoint=join(runnerRoot,'codex','fixture.mjs');
+  await mkdir(join(runnerRoot,'codex'),{recursive:true,mode:0o700});
+  await writeFile(entrypoint,'process.env.PAPPAI_RUNNER_CONFIG = '+JSON.stringify(JSON.stringify(config))+
+    ';\nawait import('+JSON.stringify(pathToFileURL(process.env.PAPPAI_TEST_CODEX_ENTRYPOINT!).href)+');\n');
+  await call('~','$.runners.add',{name:'codex',entrypoint});
   const {id:profile}=await call('~','$.profile.create',{name:'test profile',permissions:[]});
   assert.deepEqual(await call(profile,'codex.setup',{authFile}),{configured:true});
   for (const mode of ['oneShot','persistent']) {

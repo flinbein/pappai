@@ -2,21 +2,13 @@
 
 The external runner is distributed as an npm package from [pappai-runner-codex](https://github.com/flinbein/pappai-runner-codex). The administrator selects the runner and Codex CLI versions independently. [First Codex APP](../../codex.md)
 
-| Component | Location in the container | Configuration |
-|---|---|---|
-| Runner package and dependencies | For example, `/run/pappai/private/runners/` on a persistent volume | The administrator registers the absolute entry point path in the [registry](registry.md). |
-| Complete native Codex CLI distribution | For example, `/run/pappai/private/tools/codex/<version>/` on the same volume | The administrator sets the absolute path to the native executable in `config.codexExecutablePath`. |
-| Credentials, history and MCP | Separate private `profilesDir` and `stateDir` directories under `/run/pappai/private/` | The [PROFILE](profiles.md) provides the connection. The APP owns its history. |
+Open **Add runner** on the workspace, choose **npm**, enter `@flinbein/pappai-runner-codex`, and confirm the installation name. Each named installation owns a persistent directory under `/run/pappai/private/runners/`. The managed runner installs the native Codex CLI on first launch. Check progress with `runners.<name>.getVersion` on the workspace. Change the CLI version separately through `runners.<name>.installCodex({version})`.
 
-Files on a persistent volume survive container replacement when the volume is remounted at the same path. Ordinary image directories, including `/opt`, need a separate mount for this. Copy the complete distribution with its bundled resources and utilities. If an npm installation uses the wrapper as its entry point, keep the wrapper and its platform dependency as well.
-
-The controller stores the `config` supplied at registration in SQLite and delivers it only to the trusted runner host on each start. The administrator must control the executables, configuration and their parent directories. Update the configuration through `$.runners.restart({name,config})`. Restricted workers must have no alternate path to the volume mounted at `/run/pappai/private`.
+For the default name `codex`, PROFILE credentials and persistent conversations retain their storage under `/run/pappai/private/profiles` and `/run/pappai/private/state`. Other named installations isolate their state. Removing the runner deletes its dedicated package and CLI files and preserves PROFILE and APP data.
 
 ## Upgrade
 
-1. Install the runner or complete CLI in a new versioned directory. Keep the previous installation until verification is complete.
-2. In the target image, run the selected CLI by its absolute path. Check `--version` and the `initialize` exchange with `codex app-server`. CLI changes may require another check of MCP and sandbox behavior.
-3. Switch the administrative path and restart the runner through `$.runners.restart`. To roll back, restore the path to the previous compatible version and restart again.
+Prepare a release from the workspace and switch the entrypoint with `$.runners.restart({name,entrypoint})`. The previous package is available for rollback. A package rollback changes runner code only. CLI versions, credentials and stored conversation formats have their own lifecycle. See [installation](install.md) and [runner protocol](registry.md).
 
 ## Verification
 

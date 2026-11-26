@@ -4,20 +4,20 @@ Manage runners through workspace methods (`node: "~"`). The caller must be a run
 
 | Method | Result |
 |---|---|
-| `$.runners.get({})` | Lists runners, paths, enabled state and availability. |
-| `$.runners.add({name,entrypoint,settingsSchema?,config?})` | Registers a module, its APP settings schema and the installed runner's administrative configuration. Starts the host with IPC. |
-| `$.runners.restart({name,config?})` | Stops the old workers, replaces the entire administrative configuration if supplied, reloads the code and publishes `$.app.restarted` for affected running APPs. Omitting `config` preserves the stored value. |
+| `$.runners.get({})` | Lists installed names, active and previous entrypoints, preparation source (when available), settings schema, enabled state and availability. |
+| `$.runners.add({name,entrypoint})` | Starts a module inside its named private directory and registers its declared contract after the host reports readiness. |
+| `$.runners.restart({name,entrypoint?})` | Stops the old workers and waits for the selected host to become ready. A failed replacement restarts the previous working version. A successful restart publishes `$.app.restarted` for affected running APPs. |
 | `$.runners.disable({name})` | Stops the runner and moves affected running APPs to `error`. |
 | `$.runners.enable({name})` | Starts a disabled runner. The operator starts APPs that are in `error`. |
-| `$.runners.delete({name})` | Stops the runner and removes its registry entry. The built-in `process` runner can be disabled. |
+| `$.runners.delete({name})` | Stops the runner and removes its registration and dedicated installation directory. Removing a legacy registration preserves its files. The built-in `process` runner can be disabled. |
 
-The controller tracks each call's assigned worker. A runner host crash fails its pending calls. Routing between runners continues for available APPs. To update runner files, prepare compatible versions of the module and dependencies, then call `restart`.
+The controller tracks each call's assigned worker. A runner host crash fails its pending calls. Routing between runners continues for available APPs. Prepare and activate updates through the [workspace installer](install.md). Re-adding the original name allows the operator to start its existing APPs again.
 
 ## APP settings and contract
 
 The manifest selects a registered name through `run.type`. For an external runner, `run.settings` is a JSON object with runner-defined fields. The controller compiles the optional `features` dictionary into the application contract and reads subscriptions from the common `subscriptions` section. It validates each candidate's settings against the registry's `settingsSchema` after applying overrides, extracting `features` and expanding `env` secrets. It can then add service addresses for a specific assignment to the environment. The built-in `process` runner defines the rules for `command`, `cwd` and `args`.
 
-For example, a runner that accepts `{"prefix":"report "}` can register the schema `{"type":"object","properties":{"prefix":{"type":"string"}},"required":["prefix"],"additionalProperties":false}`. The manifest can declare a method in `features` alongside `prefix`. The registry list returns the saved schema. The v1 contract and schema are declarative. Dynamic contract negotiation with the runner process is planned.
+For example, a runner that accepts `{"prefix":"report "}` can register the schema `{"type":"object","properties":{"prefix":{"type":"string"}},"required":["prefix"],"additionalProperties":false}`. The manifest can declare a method in `features` alongside `prefix`. The registry list returns the saved schema. The v1 contract and schema are declarative. A managed runner declares its settings schema in the readiness message. Existing legacy hosts retain their saved schema.
 
 ## IPC messages
 
@@ -42,4 +42,6 @@ The controller opens the module with Node.js `fork()`. The host receives message
 
 [External host test with a custom schema](../../../tests/custom-runner.test.ts) · [Built-in process runner](process.md)
 
-The host receives the administrative `config` as JSON in `PAPPAI_RUNNER_CONFIG`. Registry listings omit its contents. The host announces relative PROFILE method names in a `profileMethods` message. The controller prefixes them with the registered runner name, checks permits and sends `profileCall` to the same host. A `profileRead` with an open call ID and a path requests up to 1 MiB from the caller's filesystem view. A `profileFile` reply carries the contents as base64 over IPC. Completion, cancellation, timeout or loss of the host ends the right to read again. [External runner example](codex.md)
+Newly registered hosts receive `PAPPAI_RUNNER_NAME` and `PAPPAI_RUNNER_DIR`. Within 15 seconds, send `{type:"runnerReady",payload:{kind,settingsSchema,methods}}`. All three payload fields are optional. Methods declare descriptions and optional input and output JSON schemas. The controller exposes them on the workspace as `runners.<name>.<method>` and checks full administrative permissions on each call. It sends `{type:"runnerCall",id,method,data}` with the local method name. Respond with `{type:"runnerReply",payload:{id,result}}` or `{type:"runnerReply",payload:{id,error}}`. Report readiness before starting a long tool download.
+
+Legacy registrations still receive their saved administrative configuration in `PAPPAI_RUNNER_CONFIG`. The host announces relative PROFILE method names in a `profileMethods` message. The controller prefixes them with the registered runner name, checks permits and sends `profileCall` to the same host. A `profileRead` with an open call ID and a path requests up to 1 MiB from the caller's filesystem view. A `profileFile` reply carries the contents as base64 over IPC. Completion, cancellation, timeout or loss of the host ends the right to read again. [External runner example](codex.md)

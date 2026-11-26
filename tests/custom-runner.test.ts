@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
@@ -8,9 +8,14 @@ import { createService } from '../src/server.ts';
 
 test('a registered IPC runner validates and receives its own settings without process fields', async t=>{
   const dir = mkdtempSync(join(tmpdir(),'pappai-custom-runner-'));
-  const entrypoint = join(dir,'adapter.cjs');
+  const install=join(dir,'prepend');
+  mkdirSync(install);
+  const entrypoint = join(install,'adapter.cjs');
+  const settingsSchema={type:'object',properties:{prefix:{type:'string'}},required:['prefix'],additionalProperties:false};
   writeFileSync(entrypoint,`
+    process.send({type:'runnerReady',payload:{methods:{version:{description:'Runner version'}},settingsSchema:${JSON.stringify(settingsSchema)}}});
     process.on('message', msg=>{
+      if(msg.type==='runnerCall') return process.send({type:'runnerReply',payload:{id:msg.id,result:process.env.PAPPAI_RUNNER_NAME}});
       if (msg.type==='close') return process.disconnect();
       if (msg.type!=='dispatch') return;
       const {id,appId,data,settings,holdFirst}=msg.job;
@@ -22,12 +27,14 @@ test('a registered IPC runner validates and receives its own settings without pr
     });
   `);
   const db = new DatabaseSync(':memory:');
-  const service = createService({db,origin:'http://localhost'});
+  const service = createService({db,origin:'http://localhost',runnerRoot:dir});
   t.after(async ()=>{await service.close();db.close();rmSync(dir,{recursive:true,force:true});});
   const actor = service.store.ensureAdmin('registry@example.test');
   const call = (node,method,data)=>service.controller.call(actor.id,{node,method,data,timeoutMs:3000});
-  const settingsSchema={type:'object',properties:{prefix:{type:'string'}},required:['prefix'],additionalProperties:false};
-  await call('~','$.runners.add',{name:'prepend',entrypoint,settingsSchema,config:{tool:'/private/tool'}});
+  await assert.rejects(call('~','$.runners.add',{name:'prepend',entrypoint,config:{}}),/Unexpected/);
+  await call('~','$.runners.add',{name:'prepend',entrypoint});
+  const help=service.controller.help(actor.id,{node:'~',features:'runners.prepend.version'});
+  assert.equal(help['runners.prepend.version']?.description,'Runner version');
   const runners = await call('~','$.runners.get',{});
   assert.deepEqual(runners.find(entry=>entry.name==='prepend').settingsSchema,settingsSchema);
   const source = prefix=>({manifest:{run:{type:'prepend',settings:{prefix,features:{
@@ -37,14 +44,55 @@ test('a registered IPC runner validates and receives its own settings without pr
   await assert.rejects(call(id,'$.app.manifest.set',{source:source(17)}),/registered runner schema/);
   assert.equal(service.controller.help(actor.id,{node:id}).format.version,'1');
   await call(id,'$.app.start',{});
-  await assert.rejects(call('~','$.runners.restart',{name:'prepend',config:[]}),/config/);
-  await call('~','$.runners.restart',{name:'prepend',config:{tool:'/private/new'}});
-  assert.deepEqual(await call(id,'format','hello'),{text:'test:hello',command:false,cwd:false,config:{tool:'/private/new'},holdFirst:false});
+  assert.deepEqual(await call(id,'format','hello'),{text:'test:hello',command:false,cwd:false,config:{},holdFirst:false});
+  const broken=join(install,'broken.cjs');
+  writeFileSync(broken,'process.exit(1);');
+  await assert.rejects(call('~','$.runners.restart',{name:'prepend',entrypoint:broken}),/readiness/);
+  assert.equal(await call('~','runners.prepend.version',{}),'prepend');
+  const replacement=join(install,'replacement.cjs');
+  writeFileSync(replacement,`process.send({type:'runnerReady',payload:{}});process.on('message',m=>{if(m.type==='close')process.disconnect()})`);
+  await call('~','$.runners.restart',{name:'prepend',entrypoint:replacement});
+  assert.equal((await call('~','$.runners.get',{})).find(r=>r.name==='prepend').previousEntrypoint,entrypoint);
+  await call('~','$.runners.restart',{name:'prepend',entrypoint});
+  const restricted=service.store.create('~','user',{name:'limited',email:'limited@example.test',permissions:[{node:'~',methods:true}]});
+  service.store.setStatus(restricted.id,'working');
+  await assert.rejects(service.controller.call(restricted.id,{node:'~',method:'runners.prepend.version',data:{}}),/Permission denied/);
+  await call('~','$.runners.delete',{name:'prepend'});
+  assert.equal(existsSync(install),false);
+  assert.equal(service.store.get(id)?.status,'error');
+  mkdirSync(install);
+  writeFileSync(entrypoint,`process.send({type:'runnerReady',payload:{}});process.on('message',m=>{
+    if (m.type==='close')return process.disconnect();
+    if (m.type==='dispatch'){const {id,appId}=m.job;process.send({type:'reply',payload:{id,appId,result:'reinstalled'}})}
+  });`);
+  await call('~','$.runners.add',{name:'prepend',entrypoint});
+  await call(id,'$.app.start',{});
+  assert.equal(await call(id,'format','hello'),'reinstalled');
+});
+
+test('unregistering a legacy installation preserves its shared directory',async t=>{
+  const dir=mkdtempSync(join(tmpdir(),'pappai-old-layout-'));
+  const legacy=join(dir,'shared');
+  mkdirSync(legacy);
+  const entrypoint=join(legacy,'index.cjs');
+  writeFileSync(entrypoint,'process.on("message",m=>{if(m.type==="close")process.disconnect()})');
+  const db=new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE installed_runners(name TEXT PRIMARY KEY,entrypoint TEXT,enabled INTEGER NOT NULL)');
+  db.prepare('INSERT INTO installed_runners VALUES(?,?,0)').run('old',entrypoint);
+  const service=createService({db,origin:'http://localhost',runnerRoot:dir});
+  t.after(async()=>{await service.close();db.close();rmSync(dir,{recursive:true,force:true});});
+  const actor=service.store.ensureAdmin('operator@example.test');
+  const call=(method:string,data:unknown)=>service.controller.call(actor.id,{node:'~',method,data});
+  await call('$.runners.delete',{name:'old'});
+  assert.equal(existsSync(entrypoint),true);
+  mkdirSync(join(dir,'old'));
+  await assert.rejects(call('$.runners.add',{name:'old',entrypoint}),/named runner directory/);
 });
 
 test('registered profile host reads an input through the actual caller file view',async t=>{
   const dir=mkdtempSync(join(tmpdir(),'pappai-profile-input-'));
-  const entrypoint=join(dir,'adapter.cjs');
+  mkdirSync(join(dir,'fixture'));
+  const entrypoint=join(dir,'fixture','adapter.cjs');
   const file=join(dir,'synthetic.json');
   writeFileSync(file,'{"example":true}');
   writeFileSync(entrypoint,`
@@ -55,9 +103,10 @@ test('registered profile host reads an input through the actual caller file view
         ...(msg.error ? {error:msg.error} : {result:{bytes:Buffer.from(msg.content,'base64').length}})}});
     });
     process.send({type:'profileMethods',payload:{methods:['check']}});
+    process.send({type:'runnerReady',payload:{}});
   `);
   const db=new DatabaseSync(':memory:');
-  const service=createService({db,origin:'http://localhost'});
+  const service=createService({db,origin:'http://localhost',runnerRoot:dir});
   t.after(async()=>{await service.close();db.close();rmSync(dir,{recursive:true,force:true});});
   const {store,controller}=service;
   const admin=store.ensureAdmin('owner@example.test');

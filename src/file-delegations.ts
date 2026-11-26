@@ -121,6 +121,10 @@ export class FileDelegations {
     if (view) view.revoked=true;
   }
 
+  close() {
+    for (const executor of this.endpoints.keys()) this.executorExit(executor);
+  }
+
   executorExit(executor: string, _appId?: string) {
     for (const [id, call] of this.calls) if (call.executor === executor) this.callClosed(id);
     const endpoint = this.endpoints.get(executor);

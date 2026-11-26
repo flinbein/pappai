@@ -27,6 +27,9 @@ export type ControllerHooks = {
   systemNames?:(type:NonNullable<ReturnType<Store['get']>>['type'])=>string[];
   profileCall?:(actor:string,profileId:string,method:string,data:any,callerWorkerId?:string,signal?:AbortSignal,timeoutMs?:number)=>Promise<unknown>;
   profileFeatures?:()=>string[];
+  workspaceFeatures?:()=>Map<string,{type:string;description:string;version:string;schema?:unknown}>;
+  workspaceCall?:(actor:string,method:string,data:unknown,signal?:AbortSignal,timeoutMs?:number)=>Promise<unknown>;
+  isCodex?:(name:string)=>boolean;
   manifestChanged?:(appId:string)=>boolean;
   beforeRestart?:(appId:string)=>void;
   executorStart?:(job:Assignment)=>void;
@@ -408,6 +411,8 @@ export class Controller {
     if (!app) throw Error('Node not found');
     if (app.type==='profile' && !method.startsWith('$.') && this.hooks.profileCall)
       return this.hooks.profileCall(actor,app.id,method,data ?? {},worker?.id,signal,params.timeoutMs);
+    if (app.type==='workspace' && method.startsWith('runners.') && this.hooks.workspaceCall)
+      return this.hooks.workspaceCall(actor,method,data ?? {},signal,params.timeoutMs);
     if (method.startsWith('$.')) return this.system(actor,app,method,data ?? {});
     if (app.type !== 'app' || app.status !== 'working') throw Error('APP is not working');
     const config = this.config(appId);
@@ -419,9 +424,9 @@ export class Controller {
     if (signal?.aborted) throw Error('Call cancelled');
     // Interrupting a busy turn cannot wait behind that same turn in the queue.
     let interrupt:Worker|undefined;
-    if (config.runnerType==='codex' && config.mode==='persistent' && method==='agent.interrupt') {
+    if ((this.hooks.isCodex?.(config.runnerType) ?? config.runnerType==='codex') && config.mode==='persistent' && method==='agent.interrupt') {
       if (app.profile) this.store.profileFor(app);
-      interrupt=this.instances(appId).find(w=>w.runnerType==='codex' && w.persistent && w.started && !w.retiring &&
+      interrupt=this.instances(appId).find(w=>w.runnerType===config.runnerType && w.persistent && w.started && !w.retiring &&
         w.profileId===(app.profile ?? undefined));
       if (!interrupt) throw Error('No active Codex turn');
       if (interrupt.calls.size>=100) throw Error('Too many pending calls');
@@ -671,6 +676,9 @@ export class Controller {
     const app = this.store.get(params.node);
     if (!app || !this.store.canDiscover(actor, params.node)) return {};
     const entries = new Map(app.type === 'app' ? this.config(app.id).features : []);
+    if (app.type==='workspace' && this.store.isAdmin(actor)) {
+      for (const [name,feature] of this.hooks.workspaceFeatures?.() ?? []) entries.set(name,feature);
+    }
     const core =
       app.type === 'workspace' || app.type === 'team'
         ? ['$.team.create', '$.user.create', '$.app.create', '$.profile.create']

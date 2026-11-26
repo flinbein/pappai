@@ -9,7 +9,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { chromium } from "playwright-core";
-import { exerciseCodexPanel } from "./browser-codex.mjs";
+import { exerciseCodexPanel, exerciseRunnerInstaller } from "./browser-codex.mjs";
 
 // Run explicitly from a host with Docker and Chrome. The test owns the container and its data.
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -279,14 +279,14 @@ function volume(suffix) {
   volumes.push(name);
   return name;
 }
-function startInstallation(platform, workspace) {
+function startInstallation(platform, workspace, privateData) {
   const runnerModules = process.env.PAPPAI_BROWSER_RUNNER_MODULES;
   const codexDist = process.env.PAPPAI_BROWSER_CODEX_DIST;
   assert.equal(!!runnerModules, !!codexDist, "Set both Codex fixture paths");
   docker("run","-d","--name",runId,"--cap-add","SYS_ADMIN","--security-opt","seccomp=unconfined",
     ...(runnerModules ? ["-v",runnerModules+":/installed/node_modules:ro","-v",codexDist+":/code-dist:ro"] : []),
     "-v",webRoot+":/web-releases:ro","-e","PAPPAI_WEB_ROOT=/web-releases",
-    "-v",platform+":/var/lib/pappai","-v",workspace+":/workspace",
+    "-v",platform+":/var/lib/pappai","-v",workspace+":/workspace","-v",privateData+":/run/pappai/private",
     "-e","HOST=0.0.0.0","-e","PAPPAI_ORIGIN="+origin,"-p",`127.0.0.1:${port}:8080`,runId);
   containerCreated = true;
 }
@@ -294,8 +294,8 @@ try {
   if (process.env.PAPPAI_BROWSER_WEB_PACKAGE) activateWebRelease(bundledVersion);
   docker("build","-t",runId,".");
   imageBuilt = true;
-  const platform = volume("platform"), workspace = volume("workspace");
-  startInstallation(platform,workspace);
+  const platform = volume("platform"), workspace = volume("workspace"), privateData = volume("private");
+  startInstallation(platform,workspace,privateData);
   await waitForService(origin);
   const executablePath = [process.env.PAPPAI_CHROME_BIN,
     "C:/Program Files/Google/Chrome/Application/chrome.exe",
@@ -308,10 +308,11 @@ try {
   await accountAction(admin, '#logout');
   await admin.locator("#login").click();
   await admin.locator("#workspace").waitFor({state:"visible"});
-  if (process.env.PAPPAI_BROWSER_CODEX_DIST) {
-    await exerciseCodexPanel(admin, (...args) => docker("exec",runId,...args),
-      (...args) => docker("exec","-d",runId,...args));
-  }
+  const inContainer = (...args) => docker("exec",runId,...args);
+  const background = (...args) => docker("exec","-d",runId,...args);
+  const withCodex = !!process.env.PAPPAI_BROWSER_CODEX_DIST;
+  await exerciseRunnerInstaller(admin,inContainer,background,withCodex);
+  if (withCodex) await exerciseCodexPanel(admin,inContainer,background);
   const call = (node,method,data)=>rpc(admin,"call",{node,method,data});
   const observer = await observePanel(admin.context(), origin);
   const {id:team} = await call("~","$.team.create",{name:"Acceptance",permissions:null});
@@ -731,12 +732,16 @@ try {
   const recoveredPlatform = volume("restored-platform"), recoveredWorkspace = volume("restored-workspace");
   docker("run","--rm","--network","none","-v",recoveredPlatform+":/platform","-v",recoveredWorkspace+":/workspace",
     "-v",archive+":/backup:ro",runId,"tar","xzf","/backup/data.tgz","-C","/");
-  startInstallation(recoveredPlatform,recoveredWorkspace);
+  startInstallation(recoveredPlatform,recoveredWorkspace,privateData);
   await waitForService(origin);
   assert.equal(docker("exec",runId,"cat","/workspace/restore-check"),app);
   await admin.reload();
   const tree = await rpc(admin,"discover",{});
   assert.deepEqual([team,user,app].map(id=>tree.some(n=>n.id===id)),[true,true,true]);
+  const restoredMethod = withCodex ? 'runners.codex.getVersion' : 'runners.probe.echo';
+  const restoredRunner = await call('~',restoredMethod,withCodex ? {} : {value:'restored'});
+  if (withCodex) assert.equal(restoredRunner.status,'ready');
+  else assert.deepEqual(restoredRunner,{echo:'restored'});
   assert.equal(await rpc(admin,"call",{node:app,method:"message.extractText",version:"2",data:{text:"  После восстановления  "}}),"После восстановления");
   console.log("PASS: browser passkey, APP calls, USER isolation and independent two-volume restore");
 } finally {

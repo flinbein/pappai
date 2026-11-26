@@ -6,6 +6,8 @@
 !src/*.ts
 !src/*.py
 !scripts/install-web.mjs
+!scripts/prepare-runner.mjs
+!scripts/runner-storage.mjs
 !examples/extract-text/manifest.json
 !examples/extract-text/extract.cjs
 !examples/webhook/*
