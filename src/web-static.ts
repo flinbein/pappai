@@ -33,17 +33,24 @@ export function isWebPage(path: string) {
 
 export async function serveWeb(path: string, res: ServerResponse, releaseRoot?: string) {
   const page = isWebPage(path);
-  if (!page && !path.startsWith('/_web/')) return false;
+  const sharedWorker = path === '/api/web-worker-v1.js';
+  if (!page && !sharedWorker && !path.startsWith('/_web/')) return false;
   try {
-    if (page) {
+    if (page || sharedWorker) {
       let dist = bundledDist;
+      let version = bundledVersion;
       if (releaseRoot) {
         const pointer = await readOptional(join(releaseRoot, 'current'));
         if (pointer) {
-          const version = pointer.toString('utf8').trim();
+          version = pointer.toString('utf8').trim();
           if (!versionPattern.test(version)) throw Error('Invalid web release version');
           dist = join(releaseRoot, 'releases', version);
         }
+      }
+      if (sharedWorker) {
+        res.writeHead(200, {'Content-Type':contentTypes['.js'], 'Cache-Control':'no-store'})
+          .end(`import "/_web/${version}/assets/shared-worker.js";\n`);
+        return true;
       }
       // Older releases ship a standalone terminal under this entry name.
       const html = await readFile(join(dist, path === '/terminal' ? 'terminal.html' : 'index.html'));

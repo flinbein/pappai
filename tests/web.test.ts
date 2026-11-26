@@ -93,16 +93,36 @@ test('HTTP and both WebSockets share the same USER session and canonical logout 
   const {send,db,store,port,origin}=await startWeb(t);
   const actor=store.ensureAdmin('api@example.test').id;
   const headers=signIn(db, actor);
+  const {browserSession}=JSON.parse((await send('/api/session','GET',headers)).body);
+  assert.ok(typeof browserSession === 'string' && browserSession.length > 0);
+  assert.notEqual(browserSession,'test-session');
+  assert.notEqual(browserSession,createHash('sha256').update('test-session').digest('hex'));
+  const secondCookie='another-session';
+  const secondHeaders={Cookie:'pappai-local-session='+secondCookie};
+  db.prepare('INSERT INTO web_sessions VALUES(?,?,?,?)').run(createHash('sha256').update(secondCookie).digest('hex'),'key',Date.now()+60000,Date.now()+60000);
+  const secondIdentity=JSON.parse((await send('/api/session','GET',secondHeaders)).body);
+  assert.equal(secondIdentity.user,actor);
+  assert.notEqual(secondIdentity.browserSession,browserSession);
+  assert.equal((await send('/api/rpc','POST',{Cookie:'pappai-local-session='+browserSession},{})).status,401);
   for (const prefix of ['', '/api']) {
     const session=await send(prefix+'/session','GET',headers);
-    assert.deepEqual(JSON.parse(session.body),{user:actor,canChooseSandbox:true,canManageApps:true});
+    assert.deepEqual(JSON.parse(session.body),{user:actor,browserSession,canChooseSandbox:true,canManageApps:true});
     const rpc=await send(prefix+'/rpc','POST',headers,{jsonrpc:'2.0',id:1,method:'discover'});
     assert.ok(JSON.parse(rpc.body).result.some(node=>node.id===actor));
     const login=await send(prefix+'/auth/login/options','POST',{},{});
     assert.equal(login.status,200);
     assert.ok(JSON.parse(login.body).challenge);
   }
-  const clients=await Promise.all(['/api/ws/web','/ws/events'].map(async path=>{
+  for (const path of ['/api/ws/web?browserSession=', '/api/ws/terminal?start=manual&browserSession=']) {
+    const ws=new WebSocket('ws://127.0.0.1:'+port+path+browserSession,{origin,headers:{...secondHeaders,Host:new URL(origin).host}});
+    const [,response]=await once(ws,'unexpected-response');
+    assert.equal(response.statusCode,401);
+    response.resume();
+    ws.on('error',()=>{});
+    ws.terminate();
+  }
+  const clients=await Promise.all(['/api/ws/web','/ws/events','/api/ws/web?browserSession='+browserSession,
+    '/api/ws/terminal?browserSession='+browserSession+'&start=manual'].map(async path=>{
     const ws=new WebSocket('ws://127.0.0.1:'+port+path,{origin,headers:{...headers,Host:new URL(origin).host}});
     await once(ws,'open');
     return ws;
@@ -110,7 +130,8 @@ test('HTTP and both WebSockets share the same USER session and canonical logout 
   const closed=Promise.all(clients.map(ws=>once(ws,'close')));
   assert.equal((await send('/api/auth/logout','POST',headers,{})).status,200);
   await closed;
-  assert.equal(JSON.parse((await send('/api/session','GET',headers)).body).user,null);
+  assert.deepEqual(JSON.parse((await send('/api/session','GET',headers)).body),{user:null,canChooseSandbox:false,canManageApps:false});
+  assert.deepEqual(JSON.parse((await send('/api/session','GET',secondHeaders)).body),secondIdentity);
   assert.equal((await send('/api/rpc','POST',headers,{})).status,401);
 });
 
@@ -132,9 +153,14 @@ test('switching current changes the entry while retained assets keep their origi
     await rename(join(root, 'next'), join(root, 'current'));
   }
   await activate('3.0.0', 'legacy standalone terminal');
+  const worker=await send('/api/web-worker-v1.js');
+  assert.equal(worker.headers['cache-control'],'no-store');
+  assert.match(worker.headers['content-type']!,/javascript/);
+  assert.match(worker.body, /\/_web\/3\.0\.0\/assets\/shared-worker\.js/);
   assert.match((await send('/')).body, /\/_web\/3\.0\.0\//);
   assert.equal((await send('/terminal', 'GET', headers)).body, 'legacy standalone terminal');
   await activate('3.1.0', '<script src="/_web/3.1.0/assets/panel.js"></script>');
+  assert.match((await send('/api/web-worker-v1.js')).body,/\/_web\/3\.1\.0\/assets\/shared-worker\.js/);
   assert.match((await send('/')).body, /\/_web\/3\.1\.0\//);
   const terminal = await send('/terminal?sandbox=1', 'GET', headers);
   assert.equal(terminal.status, 200);

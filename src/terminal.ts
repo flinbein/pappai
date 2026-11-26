@@ -14,7 +14,7 @@ import { fileLevel } from './permits.ts';
 
 const bridge = readFileSync(new URL('./terminal-pty.py', import.meta.url), 'utf8');
 const limit = 1024 * 1024;
-type SessionUser = (req: IncomingMessage, touch?: boolean) => string | null;
+type SessionUser = (req: IncomingMessage, touch?: boolean, expectedBrowserSession?: string) => string | null;
 const validDimension = (n: unknown) => typeof n === 'number' && Number.isInteger(n) && n >= 1 && n <= 1000;
 export type TerminalView = ReturnType<Store['fileSnapshot']> & {scratch?: {source: string; path: string}; revoked?: boolean};
 type CliAction = {files: string[]; argv: string[]; env?: Record<string,string>};
@@ -264,12 +264,19 @@ export function attachTerminals(server: Server, address: URL, store: Store, user
     function reject(status: string) {
       socket.end('HTTP/1.1 ' + status + '\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
     }
-    const route = /^\/(?:api\/)?ws\/terminal(?:\?(sandbox=1|start=manual(?:&sandbox=1)?|sandbox=1&start=manual))?$/.exec(req.url ?? '');
-    if (closing || !route) return reject('404 Not Found');
-    const manual = route[1]?.includes('start=manual') ?? false;
-    const forceSandbox = route[1]?.includes('sandbox=1') ?? false;
+    const url = req.url ?? '';
+    const path = url.split('?',1)[0];
+    const params = new URLSearchParams(url.slice(path.length+1));
+    if (closing || !['/api/ws/terminal','/ws/terminal'].includes(path)) return reject('404 Not Found');
+    for (const [key,value] of params) {
+      const valid = (key === 'sandbox' && value === '1') || (key === 'start' && value === 'manual') ||
+        (key === 'browserSession' && /^[a-zA-Z0-9_-]+$/.test(value));
+      if (!valid || params.getAll(key).length > 1) return reject('404 Not Found');
+    }
+    const manual = params.has('start');
+    const forceSandbox = params.has('sandbox');
     if (req.headers.origin !== address.origin || req.headers.host !== address.host) return reject('403 Forbidden');
-    const actor = user(req);
+    const actor = user(req, true, params.get('browserSession') ?? undefined);
     if (!actor) return reject('401 Unauthorized');
     wss.handleUpgrade(req, socket, head, ws => {
       const valid = () => user(req, false) === actor;

@@ -44,7 +44,7 @@ To add a rule, pass `{"subscriptions":[{"id":"inbox","node":"mailbox-id","events
 
 ## USER and browser tab subscriptions
 
-A signed-in USER can open `/api/ws/web` on the panel host. Each connection starts with its own empty subscription list. The controller checks the host, origin, session and USER permissions. Requests and notifications are JSON-RPC 2.0 text messages.
+A signed-in USER can open `/api/ws/web` on the panel host. Each connection starts with its own empty subscription list. The panel shares a connection across browser tabs in the same login session and routes notifications to the components that registered each listener. The controller checks the host, origin, session and USER permissions. Requests and notifications are JSON-RPC 2.0 text messages.
 
 ```jsonl
 {"jsonrpc":"2.0","id":1,"method":"subscriptions.add","params":{"subscriptions":[{"id":"mail","node":"mailbox-id","events":"mail.received"}]}}

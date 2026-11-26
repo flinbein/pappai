@@ -20,7 +20,7 @@ async function serveModel() {
 
 // A registry scoped to the test package serves a real tarball entirely inside the
 // disposable controller. Its entrypoint can also adapt the optional mounted CLI.
-export async function exerciseRunnerInstaller(page, exec, detached, codex) {
+export async function exerciseRunnerInstaller(page, exec, detached, codex, captureTerminalOutput) {
   const name = codex ? 'codex' : 'probe';
   const pkg = '@panel-test/pappai-runner-' + name;
   const dir = '/tmp/panel-registry';
@@ -57,14 +57,9 @@ export async function exerciseRunnerInstaller(page, exec, detached, codex) {
   await page.locator('#runner-source').fill(pkg+'@1.0.0');
   assert.equal(await page.locator('#runner-name').inputValue(), name);
   let terminalOutput = '';
-  function captureInstaller(ws) {
-    if (new URL(ws.url()).pathname !== '/api/ws/terminal') return;
-    page.off('websocket', captureInstaller);
-    ws.on('framereceived', ({payload}) => {
-      terminalOutput = (terminalOutput + payload.toString()).slice(-4000);
-    });
-  }
-  page.on('websocket', captureInstaller);
+  captureTerminalOutput((payload,binary) => {
+    if (binary) terminalOutput = (terminalOutput + payload.toString()).slice(-4000);
+  });
   await page.locator('#register-runner [type="submit"]').click();
   await page.locator('[aria-label="Installer terminal"] .xterm').waitFor();
   await page.waitForFunction(() => {

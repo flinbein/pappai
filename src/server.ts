@@ -142,12 +142,12 @@ export function createService({ db, origin, webRoot = process.env.PAPPAI_WEB_ROO
         return;
       }
       if (path === '/terminal' && !auth.user(req, false)) { res.writeHead(303, {Location: '/'}).end(); return; }
-      if (path !== '/api' && !path.startsWith('/api/') && req.method === 'GET' && await serveWeb(path, res, webRoot)) return;
+      if (req.method === 'GET' && await serveWeb(path, res, webRoot)) return;
       res.setHeader('Content-Type', 'application/json; charset=utf-8');
       if (apiPath === '/session' && req.method === 'GET') {
-        const actor = auth.user(req, false);
-        const admin = !!actor && store.isAdmin(actor);
-        res.end(JSON.stringify({ user: actor, canChooseSandbox: admin, canManageApps: admin }));
+        const identity = auth.browserIdentity(req);
+        const admin = !!identity && store.isAdmin(identity.user);
+        res.end(JSON.stringify({ ...(identity ?? {user:null}), canChooseSandbox: admin, canManageApps: admin }));
         return;
       }
       if (apiPath !== '/rpc' || req.method !== 'POST') {

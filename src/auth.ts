@@ -157,17 +157,28 @@ export function createAuth(db: DatabaseSync, publicOrigin: string, sendMail = se
     db.prepare("INSERT INTO web_sessions VALUES (?,?,?,?)").run(hash(sessionId),keyId,now+30*day,now+day);
     setCookie(res,"session",sessionId,30*86400);
   }
-  function user(req: IncomingMessage, touch = true): string | null {
+  function authenticatedSession(req: IncomingMessage, touch: boolean, expectedBrowserSession?: string) {
     const id = cookie(req,"session");
     if (!id) return null;
     const now = Date.now();
     const sessionHash = hash(id);
+    if (expectedBrowserSession !== undefined && browserSessionId(sessionHash) !== expectedBrowserSession) return null;
     const row = db.prepare("SELECT user_id FROM web_sessions JOIN passkeys ON key_id=passkeys.id WHERE hash=? AND expires>? AND idle_until>?").get(sessionHash,now,now);
     if (!row) return null;
     const userId = String(row.user_id);
     if (store.get(userId)?.status !== "working") return null;
     if (touch) db.prepare("UPDATE web_sessions SET idle_until=? WHERE hash=?").run(now+day,sessionHash);
-    return userId;
+    return {userId, sessionHash};
+  }
+  function browserSessionId(sessionHash: string) {
+    return hash('pappai/browser-session/' + sessionHash);
+  }
+  function user(req: IncomingMessage, touch = true, expectedBrowserSession?: string): string | null {
+    return authenticatedSession(req, touch, expectedBrowserSession)?.userId ?? null;
+  }
+  function browserIdentity(req: IncomingMessage) {
+    const current = authenticatedSession(req, false);
+    return current && {user: current.userId, browserSession: browserSessionId(current.sessionHash)};
   }
   async function route(req: IncomingMessage, res: ServerResponse, path: string) {
     if (req.method !== "POST") throw new HttpError(405,"This endpoint requires POST");
@@ -280,5 +291,5 @@ export function createAuth(db: DatabaseSync, publicOrigin: string, sendMail = se
     }
     return true;
   }
-  return { handle, user, requestMail, close:()=>Promise.allSettled([...deliveries]) };
+  return { handle, user, browserIdentity, requestMail, close:()=>Promise.allSettled([...deliveries]) };
 }

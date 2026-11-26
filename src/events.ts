@@ -4,11 +4,11 @@ import type { Controller } from './controller.ts';
 import { compileSubscriptions, changeSubscriptions } from './subscriptions.ts';
 import type { Store } from './store.ts';
 
-type UserSession = (req:IncomingMessage,touch?:boolean)=>string|null;
+type UserSession = (req:IncomingMessage,touch?:boolean,expectedBrowserSession?:string)=>string|null;
 const maxBuffered = 1024 * 1024;
 
 export function isWebRpcSocket(path: string | undefined) {
-  return path === '/api/ws/web' || path === '/ws/events';
+  return path === '/ws/events' || /^\/api\/ws\/web(?:\?browserSession=[a-zA-Z0-9_-]+)?$/.test(path ?? '');
 }
 
 function validEvents(value: unknown) {
@@ -26,7 +26,8 @@ export function attachEvents(server:Server, address:URL, store:Store, user:UserS
     const reject=(status:string)=>socket.end('HTTP/1.1 '+status+'\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
     if (closing) return reject('503 Service Unavailable');
     if (req.headers.origin !== address.origin || req.headers.host !== address.host) return reject('403 Forbidden');
-    const actor=user(req,false);
+    const browserSession=new URL(req.url!,address).searchParams.get('browserSession') ?? undefined;
+    const actor=user(req,false,browserSession);
     if (!actor) return reject('401 Unauthorized');
     wss.handleUpgrade(req,socket,head,ws=>{
       const life = new AbortController();

@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { once } from "node:events";
+import { createServer as createHttpServer, request } from "node:http";
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -9,6 +11,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { chromium } from "playwright-core";
+import { Receiver } from "ws";
 import { exerciseCodexPanel, exerciseRunnerInstaller } from "./browser-codex.mjs";
 
 // Run explicitly from a host with Docker and Chrome. The test owns the container and its data.
@@ -45,6 +48,71 @@ async function freePort() {
   const port = s.address().port;
   await new Promise(resolve=>s.close(resolve));
   return port;
+}
+
+// Observe real controller connections from pages and SharedWorkers. Forward the original
+// WebSocket handshake and bytes, including TCP close, browser cookies and PTY backpressure.
+async function observeTraffic(controllerPort) {
+  const sockets = [];
+  const offline = new Set();
+  let observeNextTerminal;
+  const options = req => ({hostname:'127.0.0.1',port:controllerPort,path:req.url,method:req.method,headers:req.headers});
+  const server = createHttpServer((req, res) => {
+    const upstream = request(options(req), reply => {
+      res.writeHead(reply.statusCode, reply.headers);
+      reply.pipe(res);
+    });
+    upstream.on('error', () => res.writeHead(502).end());
+    req.pipe(upstream);
+  });
+  server.on('upgrade', (req, client, head) => {
+    const url = new URL(req.url, 'http://localhost');
+    const session = url.searchParams.get('browserSession');
+    if (url.pathname === '/api/ws/web' && offline.has(session)) return client.destroy();
+    const upgrade = request(options(req));
+    upgrade.on('error', () => client.destroy());
+    upgrade.on('response', reply => { reply.resume(); client.destroy(); });
+    upgrade.on('upgrade', (reply, upstream, upstreamHead) => {
+      const headers = reply.rawHeaders;
+      const lines = [`HTTP/1.1 101 ${reply.statusMessage}`];
+      for (let i = 0; i < headers.length; i += 2) lines.push(headers[i] + ': ' + headers[i+1]);
+      client.write(lines.join('\r\n') + '\r\n\r\n');
+      const receiver = new Receiver({isServer:true});
+      const connection = {path:url.pathname,session,client,receiver};
+      sockets.push(connection);
+      if (url.pathname === '/api/ws/terminal' && observeNextTerminal) {
+        const output = new Receiver({isServer:false});
+        output.on('message',observeNextTerminal);
+        observeNextTerminal = undefined;
+        if (upstreamHead.length) output.write(upstreamHead);
+        upstream.pipe(output);
+      }
+      client.on('error', () => upstream.destroy());
+      upstream.on('error', () => client.destroy());
+      client.once('close', () => upstream.destroy());
+      upstream.once('close', () => client.destroy());
+      if (head.length) { upstream.write(head); receiver.write(Buffer.from(head)); }
+      if (upstreamHead.length) client.write(upstreamHead);
+      // ws unmasks frames in place. Keep the original bytes intact for the controller.
+      client.on('data',chunk => receiver.write(Buffer.from(chunk)));
+      client.pipe(upstream).pipe(client);
+    });
+    upgrade.end();
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  return {port:server.address().port, sockets, offline, captureTerminalOutput(receive) {
+    observeNextTerminal = receive;
+  }, close() {
+    for (const {client} of sockets) client.destroy();
+    server.closeAllConnections();
+    server.close();
+  }};
+}
+async function sessionIdentity(page) {
+  const {browserSession} = await (await page.request.get(origin+'/api/session')).json();
+  assert.ok(typeof browserSession === 'string' && browserSession);
+  return browserSession;
 }
 async function waitForService(origin) {
   for (let i=0; i<100; i++) {
@@ -139,7 +207,8 @@ async function sendTerminalLine(page, line) {
 
 async function terminal(page, {sandbox, canChooseSandbox}) {
   if (new URL(page.url()).pathname !== '/terminal') await page.locator('#nav-terminal').click();
-  await page.locator('#new-terminal[aria-selected=true]').waitFor();
+  const launcher = page.locator('#new-terminal');
+  if (await launcher.getAttribute('aria-selected') !== 'true') await launcher.click();
   assert.equal(await page.locator('#terminal-command').inputValue(), '/bin/sh -i');
   const checkbox = page.locator('#terminal-sandbox');
   assert.equal(await checkbox.isVisible(), canChooseSandbox);
@@ -151,7 +220,7 @@ async function terminal(page, {sandbox, canChooseSandbox}) {
   await assertTerminalState(tab, 'online');
   assert.equal(await tab.locator('.terminal-tab-dot').getAttribute('title'), 'working');
   assert.equal(await page.locator('.terminal-statusbar').count(), 0);
-  await page.waitForFunction(() => /[#$]\s*$/.test(document.querySelector('.xterm-rows')?.textContent ?? ''));
+  await page.waitForFunction(() => /[#$]\s*$/.test(document.querySelector('.terminal-frame:not([hidden]) .xterm-rows')?.textContent ?? ''));
   async function command(line) {
     if (await tab.getAttribute('aria-selected') !== 'true') await tab.click();
     await sendTerminalLine(page, line);
@@ -192,15 +261,97 @@ async function touchStroke(page, selector, dx, dy, fingers = 1, holdMs = 0) {
   }
 }
 
+async function checkSharedTerminal(owner, first, second, socket) {
+  const viewer = await owner.context().newPage();
+  const firstId = await first.getAttribute('data-terminal');
+  const secondId = await second.getAttribute('data-terminal');
+  const tab = id => viewer.locator(`.terminal-tab[data-terminal="${id}"]`);
+  const frame = '.terminal-frame:not([hidden])';
+  const screen = frame + ' .terminal-screen';
+  const readOnly = page => page.locator(frame+' .terminal-view[data-readonly=true]');
+  const control = page => readOnly(page).locator('.terminal-take-control button');
+  async function checkViewer(page) {
+    await control(page).waitFor();
+    const hatch = await readOnly(page).locator('.terminal-screen').evaluate(el => getComputedStyle(el,'::after').backgroundImage);
+    assert.match(hatch,/repeating-linear-gradient/);
+  }
+  const pauseForPaint = page => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  const input = [];
+  const sizes = [];
+  const record = (payload,binary) => {
+    if (binary) input.push(payload.toString());
+    else if (JSON.parse(payload.toString()).cols) sizes.push(JSON.parse(payload.toString()));
+  };
+  socket.receiver.on('message',record);
+  await viewer.goto(origin+'/terminal');
+  await tab(firstId).click();
+  await checkViewer(viewer);
+  await viewer.locator(frame+' .xterm-rows').getByText('sharedhistory',{exact:true}).waitFor();
+  await tab(firstId).getByText('First shell',{exact:true}).waitFor();
+  await tab(secondId).getByText('Second shell',{exact:true}).waitFor();
+  for (const page of [owner,viewer]) {
+    await page.bringToFront();
+    for (const gesture of ['wheel','touch']) {
+      for (const [delta,id] of [[150,secondId],[-150,firstId]]) {
+        await page.locator('.terminal-track:not([data-moving])').waitFor();
+        if (gesture === 'wheel') {
+          const box = await page.locator(screen).boundingBox();
+          await page.mouse.move(box.x+box.width/2,box.y+box.height/2);
+          await page.mouse.wheel(delta,0);
+        } else await touchStroke(page,screen,-delta,0,2);
+        await page.locator(`.terminal-tab[data-terminal="${id}"][aria-selected=true]`).waitFor({timeout:3000});
+        await control(page).waitFor({state:page === owner ? 'hidden' : 'visible'});
+      }
+    }
+  }
+  await viewer.locator('.terminal-track:not([data-moving])').waitFor();
+  input.length = sizes.length = 0;
+  await readOnly(viewer).focus();
+  await viewer.keyboard.type('viewer-input');
+  await viewer.setViewportSize({width:860,height:600});
+  await pauseForPaint(viewer);
+  assert.deepEqual(sizes,[], 'A viewer resize must not reach the PTY');
+  assert.equal(input.length,0,'Typing in a viewer must not reach the PTY');
+  await control(viewer).click();
+  await checkViewer(owner);
+  await readOnly(viewer).waitFor({state:'hidden'});
+  await sendTerminalLine(viewer,"printf 'new%s\\n' owner");
+  await owner.locator(frame+' .xterm-rows').getByText('newowner',{exact:true}).waitFor();
+  input.length=0;
+  await owner.bringToFront();
+  await readOnly(owner).focus();
+  await owner.keyboard.press('Enter');
+  await control(viewer).waitFor();
+  await readOnly(owner).waitFor({state:'hidden'});
+  assert.ok(!/[\r\n]/.test(input.join('')), 'The takeover Enter must not reach the PTY');
+  await control(viewer).click();
+  await control(owner).waitFor();
+  await viewer.reload();
+  await tab(firstId).click();
+  await viewer.locator(frame+' .xterm-rows').getByText('newowner',{exact:true}).waitFor();
+  if (await control(viewer).isVisible()) await control(viewer).click();
+  await readOnly(viewer).waitFor({state:'hidden'});
+  await sendTerminalLine(viewer,"printf 'reload%s\\n' survived");
+  await owner.locator(frame+' .xterm-rows').getByText('reloadsurvived',{exact:true}).waitFor();
+  await viewer.close();
+  if (await control(owner).isVisible()) await control(owner).click();
+  await readOnly(owner).waitFor({state:'hidden'});
+  assert.equal(socket.client.destroyed,false);
+  socket.receiver.off('message',record);
+  console.log('PASS: shared PTY history, viewer carousel, input ownership, takeover Enter, reload and controlling tab close');
+}
+
 async function checkMethodLink(context, origin, app) {
   const page = await context.newPage();
   const url = origin + '/nodes/' + app + '/methods/message.extractText';
   const calls = [];
-  page.on('websocket', socket => socket.on('framesent', ({payload}) => {
-    if (!socket.url().endsWith('/api/ws/web')) return;
-    const message = JSON.parse(payload);
+  const session = await sessionIdentity(page);
+  const [socket] = traffic.sockets.filter(ws => ws.session === session && ws.path === '/api/ws/web' && !ws.client.destroyed);
+  const observe = payload => {
+    const message = JSON.parse(payload.toString());
     if (message.method === 'call' && message.params.method === 'message.extractText') calls.push(message);
-  }));
+  };
+  socket.receiver.on('message',observe);
   await page.setViewportSize({width:390, height:760});
   await page.goto(url);
   const form = page.locator('#method-call');
@@ -243,33 +394,37 @@ async function checkMethodLink(context, origin, app) {
   await page.goBack();
   await page.waitForURL(origin+'/nodes/~');
   await page.close();
+  socket.receiver.off('message',observe);
   console.log('PASS: direct method and create links, responsive panes, shared draft and explicit JSON submission');
 }
 
 async function observePanel(context, origin) {
   const page = await context.newPage();
-  let connected, upstream, offline = false;
-  await page.routeWebSocket('**/api/ws/web', route => {
-    if (offline) return route.close({code:1013});
-    connected = route;
-    upstream = route.connectToServer();
-  });
-  // This tab must be able to use the workspace entirely through its control socket.
+  const session = await sessionIdentity(page);
+  const connections = () => traffic.sockets.filter(ws => ws.session === session && ws.path === '/api/ws/web');
+  const [original] = connections();
+  assert.equal(connections().length, 1);
   await page.route('**/api/rpc', route => route.abort());
   await page.goto(origin);
   await page.locator('[data-node="~"]').waitFor();
+  const nodes = await rpc(page,'discover',{});
+  assert.ok(nodes.some(node => node.id === '~'));
+  assert.deepEqual(connections(),[original], 'Both pages must issue RPC through their single original connection');
   return {
     page,
     async disconnect() {
-      offline = true;
-      await Promise.all([connected.close({code:1012}), upstream.close({code:1012})]);
+      traffic.offline.add(session);
+      const closed = once(original.client,'close');
+      original.client.destroy();
+      await closed;
     },
-    reconnect() { offline = false; },
+    reconnect() { traffic.offline.delete(session); },
   };
 }
 
-const port = await freePort();
-const origin = "http://localhost:"+port;
+const controllerPort = await freePort();
+const traffic = await observeTraffic(controllerPort);
+const origin = "http://localhost:"+traffic.port;
 let browser;
 let imageBuilt = false;
 let containerCreated = false;
@@ -287,7 +442,7 @@ function startInstallation(platform, workspace, privateData) {
     ...(runnerModules ? ["-v",runnerModules+":/installed/node_modules:ro","-v",codexDist+":/code-dist:ro"] : []),
     "-v",webRoot+":/web-releases:ro","-e","PAPPAI_WEB_ROOT=/web-releases",
     "-v",platform+":/var/lib/pappai","-v",workspace+":/workspace","-v",privateData+":/run/pappai/private",
-    "-e","HOST=0.0.0.0","-e","PAPPAI_ORIGIN="+origin,"-p",`127.0.0.1:${port}:8080`,runId);
+    "-e","HOST=0.0.0.0","-e","PAPPAI_ORIGIN="+origin,"-p",`127.0.0.1:${controllerPort}:8080`,runId);
   containerCreated = true;
 }
 try {
@@ -312,7 +467,7 @@ try {
   const inContainer = (...args) => docker("exec",runId,...args);
   const background = (...args) => docker("exec","-d",runId,...args);
   const withCodex = !!process.env.PAPPAI_BROWSER_CODEX_DIST;
-  await exerciseRunnerInstaller(admin,inContainer,background,withCodex);
+  await exerciseRunnerInstaller(admin,inContainer,background,withCodex,traffic.captureTerminalOutput);
   if (withCodex) await exerciseCodexPanel(admin,inContainer,background);
   const call = (node,method,data)=>rpc(admin,"call",{node,method,data});
   if (!withCodex) {
@@ -346,8 +501,15 @@ try {
   await call(app,"$.app.start",{});
   await status.filter({hasText:'Running'}).waitFor();
   await observer.disconnect();
-  const {id:missedTeam} = await call(team, '$.team.create', {name:'Created while disconnected', permissions:null});
-  await call(app, '$.app.stop', {});
+  async function offlineCall(node,method,data) {
+    const response = await admin.request.post(origin+'/api/rpc',{headers:{Origin:origin},
+      data:{jsonrpc:'2.0',id:1,method:'call',params:{node,method,data}}});
+    const reply = await response.json();
+    assert.equal(reply.error,undefined);
+    return reply.result;
+  }
+  const {id:missedTeam} = await offlineCall(team, '$.team.create', {name:'Created while disconnected', permissions:null});
+  await offlineCall(app, '$.app.stop', {});
   assert.equal(await observer.page.locator(`[data-node="${missedTeam}"]`).count(), 0);
   observer.reconnect();
   await observer.page.locator(`[data-node="${missedTeam}"]`).waitFor();
@@ -423,12 +585,13 @@ try {
       return lock;
     };
   });
-  const sockets = [];
-  directTab.on('websocket', ws => { if (ws.url().includes('/api/ws/terminal')) sockets.push(ws); });
+  const adminSession = await sessionIdentity(admin);
+  const startSocket = traffic.sockets.length;
+  const sockets = () => traffic.sockets.slice(startSocket).filter(s => s.session === adminSession && s.path === '/api/ws/terminal');
   await directTab.goto(origin + '/terminal');
   await directTab.locator('#terminal-command').waitFor();
   assert.equal(await directTab.locator('.terminal-tab[data-terminal]').count(), 0);
-  assert.equal(sockets.length, 0, 'Opening the launch form must not start a PTY');
+  assert.equal(sockets().length, 0, 'Opening the launch form must not start a PTY');
   const direct = await terminal(directTab, {sandbox:false, canChooseSandbox:true});
   assert.equal(await direct.tab.locator('.terminal-tab-title').textContent(), 'sh');
   assert.equal(await direct.tab.textContent(), 'sh');
@@ -450,7 +613,7 @@ try {
   await direct.command('echo "$PANEL_TEST" >/tmp/pane-return');
   await exists('/tmp/pane-return');
   assert.equal(docker('exec', runId, 'cat', '/tmp/pane-return'), 'still_here');
-  assert.equal(sockets.length, 1);
+  assert.equal(sockets().length, 1);
   const originalScript = await direct.page.locator('script[type=module][src]').first().getAttribute('src');
   assert.ok(originalScript.startsWith('/_web/'+bundledVersion+'/'));
   await direct.page.waitForFunction(() => document.querySelector('.xterm-rows')?.textContent.includes('#'));
@@ -476,7 +639,7 @@ try {
   await direct.tab.getByText('First shell', {exact:true}).waitFor();
   await directTab.locator('#new-terminal').click();
   await directTab.locator('#terminal-command').waitFor();
-  assert.equal(sockets.length, 1);
+  assert.equal(sockets().length, 1);
   const second = await launchTerminal(directTab, '/bin/sh -i');
   await assertTerminalState(second.tab, 'online');
   await sendTerminalLine(directTab, "test -z \"$PANEL_TEST\" && printf 'isolated%s\\n' environment; printf '\\033]2;Second shell\\007'");
@@ -486,30 +649,38 @@ try {
   await direct.tab.click();
   assert.equal(await direct.tab.locator('.terminal-tab-title').textContent(), 'First shell');
   assert.doesNotMatch(await activeRows.textContent(), /isolatedenvironment/);
-  assert.equal(sockets.length, 2);
-  const secondaryClosed = sockets[1].waitForEvent('close');
+  assert.equal(sockets().length, 2);
+  await direct.command("printf 'shared%s\\n' history");
+  await activeRows.getByText('sharedhistory',{exact:true}).waitFor();
+  await checkSharedTerminal(directTab,direct.tab,second.tab,sockets()[0]);
+  assert.equal(sockets().length, 2, 'Opening a viewer, switching control and reloading must preserve both PTYs');
+  const secondaryClosed = once(sockets()[1].client,'close');
   directTab.once('dialog', dialog => dialog.accept());
   await second.close.click();
   await secondaryClosed;
   await second.tab.waitFor({state:'detached'});
-  assert.equal(sockets[0].isClosed(), false);
+  assert.equal(sockets()[0].client.destroyed, false);
   await direct.command("printf 'retained:%s\\n' \"$PANEL_TEST\"");
   await activeRows.getByText('retained:still_here', {exact:true}).waitFor();
 
-  const limitedSockets = [];
-  limited.on('websocket', ws => { if (ws.url().includes('/api/ws/terminal')) limitedSockets.push(ws); });
+  const limitedSession = await sessionIdentity(limited);
+  assert.notEqual(limitedSession,adminSession);
+  const limitedSockets = () => traffic.sockets.filter(s => s.session === limitedSession && s.path === '/api/ws/terminal');
+  await limited.locator('#nav-terminal').click();
+  await limited.locator('#terminal-command').waitFor();
+  assert.equal(await limited.locator('.terminal-tab[data-terminal]').count(),0);
   const jailed = await terminal(limited, {sandbox:true, canChooseSandbox:false});
   const optional = await terminal(admin, {sandbox:true, canChooseSandbox:true});
   await optional.command("test ! -e /opt/pappai/src && printf 'closed%s\\n' scrollback; exit");
   await assertTerminalState(optional.tab, 'closed');
   assert.equal(await optional.tab.locator('.terminal-tab-dot').getAttribute('title'), 'exit code 0');
-  await admin.locator('.xterm-cursor').waitFor({state:'detached'});
+  await admin.locator('.terminal-frame:not([hidden]) .xterm-cursor').waitFor({state:'detached'});
   await admin.locator('[data-node="~"]').click();
-  assert.equal(await admin.locator('#nav-terminal .online-dot').count(), 0);
+  await admin.locator('#nav-terminal .online-dot').waitFor();
   await admin.locator('#nav-terminal').click();
   await optional.tab.and(admin.locator('[aria-selected=true]')).waitFor();
-  assert.match(await admin.locator('.xterm-rows').textContent(), /closedscrollback/);
-  assert.ok(await admin.locator('#ctrl').isDisabled());
+  assert.match(await admin.locator('.terminal-frame:not([hidden]) .xterm-rows').textContent(), /closedscrollback/);
+  assert.ok(await admin.locator('.terminal-frame:not([hidden]) #ctrl').isDisabled());
   const completed = await launchTerminal(admin,
     `/bin/sh -c 'printf "[%s][%s][%s]\\n" "$1" "$2" "$3"; exit 7' args "two words" '' '$HOME'`);
   await assertTerminalState(completed.tab, 'nonzero');
@@ -535,9 +706,11 @@ try {
     await session.close.click();
     await session.tab.waitFor({state:'detached'});
   }
-  await admin.locator('#new-terminal[aria-selected=true]').waitFor();
+  await admin.locator('#new-terminal').click();
   await admin.locator('#terminal-command').waitFor();
-  assert.equal(await admin.locator('.terminal-tab[data-terminal]').count(), 0);
+  assert.equal(await admin.locator('.terminal-tab[data-terminal]').count(), 1);
+  const remaining = admin.locator(`.terminal-tab[data-terminal="${await direct.tab.getAttribute('data-terminal')}"]`);
+  await assertTerminalState(remaining,'online');
   console.log('PASS: explicit terminal launch, independent shell tabs, OSC titles, quoted arguments and lifecycle');
   // Record results on the test container filesystem via the interactive PTY.
   const tmp = '/var/lib/pappai/tmp/' + user;
@@ -733,16 +906,33 @@ try {
   await jailed.command('echo ok > /tmp/interrupt');
   await exists(tmp + '/interrupt');
   await direct.page.close();
+  await remaining.click();
+  const takeControl = admin.locator('.terminal-frame:not([hidden]) .terminal-take-control button');
+  if (await takeControl.isVisible()) await takeControl.click();
+  await sendTerminalLine(admin,'echo $$ > /tmp/after-owner-closed');
+  await exists('/tmp/after-owner-closed');
+  assert.equal(docker('exec',runId,'cat','/tmp/after-owner-closed'),originalShell);
+  admin.once('dialog',dialog => dialog.accept());
+  await remaining.locator('..').locator('[data-close-terminal]').click();
+  await remaining.waitFor({state:'detached'});
+  await admin.locator('#new-terminal[aria-selected=true]').waitFor();
+  assert.equal(await admin.locator('.terminal-tab[data-terminal]').count(),0);
+  await admin.locator('[data-node="~"]').click();
+  assert.equal(await admin.locator('#nav-terminal .online-dot').count(),0);
   const extraJailed = await launchTerminal(limited, '/bin/sh -i');
   await assertTerminalState(extraJailed.tab, 'online');
-  assert.equal(limitedSockets.length, 2);
+  assert.equal(limitedSockets().length, 2);
   const signOutTab = await limited.context().newPage();
-  await signOutTab.goto(origin);
+  await signOutTab.goto(origin+'/terminal');
+  await signOutTab.locator(`.terminal-tab[data-terminal="${await jailed.tab.getAttribute('data-terminal')}"]`).click();
+  await signOutTab.locator('.terminal-frame:not([hidden]) .terminal-view[data-readonly=true]').waitFor();
   await Promise.all([
-    ...limitedSockets.map(ws => ws.waitForEvent('close', {timeout:10000})),
+    ...limitedSockets().map(ws => once(ws.client,'close',{signal:AbortSignal.timeout(10000)})),
     accountAction(signOutTab, '#logout'),
   ]);
   await limited.locator('.terminal-tab[data-state=online]').first().waitFor({state:'detached'});
+  await limited.locator('#login').waitFor();
+  await signOutTab.locator('#login').waitFor();
   await signOutTab.close();
   docker('exec', runId, 'touch', tmp + '/release', '/tmp/release');
   await exists('/tmp/direct-job');
@@ -772,6 +962,7 @@ try {
   console.log("PASS: browser passkey, APP calls, USER isolation and independent two-volume restore");
 } finally {
   await browser?.close();
+  traffic.close();
   if (containerCreated) docker("rm","-f","-v",runId);
   for (const name of volumes) docker("volume","rm",name);
   if (imageBuilt) docker("image","rm",runId);
