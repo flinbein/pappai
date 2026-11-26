@@ -29,11 +29,15 @@ export async function exerciseRunnerInstaller(page, exec, detached, codex) {
       profilesDir:'/run/pappai/private/profiles', stateDir:'/run/pappai/private/state',
       codexExecutablePath:'/code-dist/bin/codex', modelBaseUrl:'http://127.0.0.1:19871/v1',
     })) + ';\nawait import("/installed/node_modules/@flinbein/pappai-runner-codex/src/index.mjs");'
-    : `process.on('message', ({type, id, data}) => {
+    : `process.on('message', ({type, id, method, data}) => {
         if (type === 'close') process.disconnect();
-        if (type === 'runnerCall') process.send({type:'runnerReply',payload:{id,result:{echo:data.value}}});
+        if (type === 'runnerCall') {
+          const result = method === '@cli.prepare' ? {files:[],argv:['pappai','help',data.node,'probe.verify']} : {echo:data.value};
+          process.send({type:'runnerReply',payload:{id,result}});
+        }
       });
-      process.send({type:'runnerReady',payload:{methods:{echo:{description:'Echo the supplied value'}}}});`;
+      process.send({type:'runnerReady',payload:{methods:{echo:{description:'Echo the supplied value'}},
+        profileCli:{verify:{description:'Interactive fixture',schema:{input:{type:'object',additionalProperties:false}}}}}});`;
   const registry = 'http://127.0.0.1:19872';
   exec('mkdir','-p',dir+'/package',dir+'/@panel-test');
   const write = (file, content) => exec('node','-e',"require('fs').writeFileSync(process.argv[1],process.argv[2])",file,content);

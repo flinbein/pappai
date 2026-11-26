@@ -26,7 +26,23 @@ function checkPath(path: string) {
 
 // Build the complete mount list before spawning. Neither validation failure nor a
 // bubblewrap setup error may fall back to a launch on the host.
-export function sandboxArgs(job: Pick<Assignment<ProcessSettings>, 'appId' | 'sandbox' | 'settings'|'runtimeMounts'>): string[] {
+type SandboxJob = Pick<Assignment<ProcessSettings>, 'appId' | 'sandbox' | 'settings'|'runtimeMounts'>;
+type TerminalMounts = {
+  socket?: string;
+  files: number;
+  scratch?: {source: string; path: string};
+};
+
+export function sandboxArgs(job: SandboxJob): string[] {
+  return buildSandboxArgs(job);
+}
+
+// Only the terminal launcher can supply these mounts and inherited file descriptors.
+export function terminalSandboxArgs(job: Omit<SandboxJob, 'runtimeMounts'>, terminal: TerminalMounts): string[] {
+  return buildSandboxArgs(job, terminal);
+}
+
+function buildSandboxArgs(job: SandboxJob, terminal?: TerminalMounts): string[] {
   const {sandbox, settings} = job;
   if (process.platform !== 'linux' || !sandbox || typeof sandbox.network !== 'boolean' ||
       !Array.isArray(sandbox.read) || !Array.isArray(sandbox.write)) throw new Error('unsupported sandbox profile');
@@ -79,7 +95,13 @@ export function sandboxArgs(job: Pick<Assignment<ProcessSettings>, 'appId' | 'sa
       !isAbsolute(mount.source) || realpathSync(mount.source)!==mount.source) throw Error('Invalid runtime mount');
     args.push(mount.readonly?'--ro-bind':'--bind',mount.source,mount.target);
   }
-  args.push('--dev', '/dev', '--proc', '/proc', '--bind', privateTmp, '/tmp', '--remount-ro', '/',
+  args.push('--dev', '/dev', '--proc', '/proc', '--bind', privateTmp, '/tmp');
+  if (terminal) {
+    if (terminal.socket) args.push('--ro-bind', terminal.socket, '/run/pappai/terminal.sock');
+    for (let i = 0; i < terminal.files; i++) args.push('--ro-bind-fd', String(5 + i), '/run/pappai/cli/' + i);
+    if (terminal.scratch) args.push('--bind', terminal.scratch.source, terminal.scratch.path);
+  }
+  args.push('--remount-ro', '/',
     '--chdir', settings.cwd, '--clearenv');
   for (const [key, value] of Object.entries({...baseEnvironment, ...settings.env})) {
     if (!key || key.includes('=') || key.includes('\0') || typeof value !== 'string' ||

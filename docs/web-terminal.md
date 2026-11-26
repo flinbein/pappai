@@ -4,6 +4,12 @@ Sign in and open **Terminal** from the sidebar or visit `/terminal`. The **+** t
 
 Use **+** again to open another terminal. Each terminal has its own process, input and scrollback. Switching tabs or visiting another workspace pane keeps the terminals running. The tab displays the program name or its current title. Hover over the status icon to see the state or exit code.
 
+Use **Edit as rows** to enter individual arguments, including empty strings. In compact input, quote arguments containing spaces and escape a literal quote or backslash. An unfinished quote or escape must be corrected before starting. Expand **Environment** to add variables for this process.
+
+A node can advertise an interactive action in its help with `type:"cli"`. Open that action to see its terminals, select **+** and choose **Run**. The form validates the arguments and environment against the feature's schema. On the main **Terminal** page these sessions appear in groups by node and action. Expand the group to select a session. Closing a starting or running session, or a group containing one, requires confirmation. [Try interactive Codex login](codex.md)
+
+In a terminal, `pappai discover` lists visible nodes and `pappai help --doc NODE_ID` displays their help. Use `pappai call NODE_ID METHOD '{}'` to call a method and `pappai cli NODE_ID FEATURE` for an interactive action. These commands use the signed-in USER's permissions. [Command reference](dev/terminal-cli.md)
+
 Choose a theme on **+**, or use **🎨** in the tools row to change the active terminal. The theme colors its ANSI output, tab and toolbar. The browser remembers the last choice for new terminals. Each open tab keeps its own theme.
 
 | Icon | Meaning |

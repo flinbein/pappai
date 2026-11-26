@@ -10,6 +10,7 @@ type PathSelector = string | string[] | boolean;
 export type Rule = {
   node?: NodeSelector | NodeSelector[];
   nodeType?: NodeType | NodeType[];
+  cli?: MessageSelector;
   methods?: MessageSelector;
   events?: MessageSelector;
   discover?: boolean;
@@ -23,7 +24,7 @@ export type Rule = {
 export type Permissions = Rule[] | null;
 
 const nodeTypes = ['workspace', 'team', 'user', 'app', 'profile'];
-const knownFields = new Set(['node','nodeType','methods','events','discover','delivery','network','http','read','write','deny']);
+const knownFields = new Set(['node','nodeType','methods','cli','events','discover','delivery','network','http','read','write','deny']);
 const nodePattern = /^(?:@|(?:~|[A-Za-z0-9_-]+|\.|\.\.(?:\/\.\.)*)(?:\/(?:\*{1,2}|&))?)$/;
 
 function list<T>(value: T | T[]): T[] {
@@ -100,7 +101,7 @@ export function validatePermissions(value: unknown): asserts value is Permission
     if ('nodeType' in rule && !list(rule.nodeType).every(t => nodeTypes.includes(t))) {
       throw new Error('Invalid node type');
     }
-    for (const field of ['methods','events']) {
+    for (const field of ['methods','cli','events']) {
       if (field in rule) validateMessages(rule[field]);
     }
     for (const field of ['read','write']) {
@@ -149,7 +150,7 @@ export function matchesName(filter: NameSelector | undefined, method: string): b
   });
 }
 
-export type Capability = 'methods'|'events'|'http'|'network'|'delivery'|'discover';
+export type Capability = 'methods'|'cli'|'events'|'http'|'network'|'delivery'|'discover';
 export function allowsAtLevel(rules: Permissions, owners: string[], targets: string[], targetType: NodeType,
     actorId: string, method?: string, capability: Capability = method === undefined ? 'discover' : 'methods',
     data?: unknown, resolve?: ResolveNodes, member?: (team:string,id:string)=>boolean): boolean {

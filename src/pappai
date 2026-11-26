@@ -1,0 +1,139 @@
+#!/usr/bin/python3 -I
+"""POSIX client for the authenticated RPC endpoint of a pappai terminal."""
+import json
+import os
+import select
+import socket
+import struct
+import sys
+import termios
+import tty
+
+
+USAGE = """Usage:
+  pappai call NODE METHOD [JSON]
+  pappai help [--schema] [--doc] NODE [FEATURE]
+  pappai discover [JSON]
+  pappai emit EVENT [JSON]
+  pappai cli NODE METHOD [JSON]
+  pappai cli NODE METHOD -- [ARG ...]"""
+
+
+def request(args):
+    if not args or args[0] in ('--help', '-h'):
+        print(USAGE)
+        sys.exit(0)
+    op, *args = args
+    if op == 'cli' and len(args) >= 3 and args[2] == '--':
+        return op, {'node': args[0], 'method': args[1], 'input': {'args': args[3:]}}
+    if op in ('call', 'cli') and len(args) in (2, 3):
+        data = json.loads(args[2]) if len(args) == 3 else {}
+        return op, {'node': args[0], 'method': args[1], 'input' if op == 'cli' else 'data': data}
+    if op == 'help':
+        options = {}
+        while args and args[0] in ('--doc', '--schema'):
+            options[args.pop(0)[2:]] = True
+        if len(args) in (1, 2):
+            if len(args) == 2:
+                options['features'] = args[1]
+            elif options:
+                options['features'] = True
+            return op, {'node': args[0], **options}
+    if op == 'discover' and len(args) <= 1:
+        return op, json.loads(args[0]) if args else {}
+    if op == 'emit' and len(args) in (1, 2):
+        return 'publish', {'event': args[0], 'data': json.loads(args[1]) if len(args) == 2 else {}}
+    raise ValueError(USAGE)
+
+
+def receive(sock, size):
+    data = bytearray()
+    while len(data) < size:
+        part = sock.recv(size - len(data))
+        if not part:
+            raise ValueError('Terminal connection closed')
+        data.extend(part)
+    return data
+
+
+def frame(sock):
+    kind, size = struct.unpack('!BI', receive(sock, 5))
+    if size > 16 * 1024 * 1024 or kind not in (0, 1):
+        raise ValueError('Invalid terminal response')
+    data = receive(sock, size)
+    if kind:
+        return data
+    status = json.loads(data)
+    if 'error' in status:
+        raise ValueError(status['error'])
+    return status
+
+
+def geometry():
+    try:
+        size = os.get_terminal_size()
+        return min(1000, max(1, size.columns)), min(1000, max(1, size.lines))
+    except OSError:
+        return 80, 24
+
+
+def relay(sock, size):
+    started = frame(sock)
+    if not isinstance(started, dict) or not started.get('started'):
+        raise ValueError('Terminal command did not start')
+    previous = termios.tcgetattr(0) if os.isatty(0) else None
+    inputs = [sock, 0]
+    try:
+        if previous is not None:
+            tty.setraw(0, termios.TCSANOW)
+        while True:
+            ready, _, _ = select.select(inputs, [], [], 0.2)
+            current = geometry()
+            if current != size:
+                cols, rows = size = current
+                sock.sendall(struct.pack('!BIHH', 2, 4, rows, cols))
+            if sock in ready:
+                data = frame(sock)
+                if isinstance(data, dict):
+                    code = data['exitCode']
+                    return code if code >= 0 else 128 - code
+                sys.stdout.buffer.write(data)
+                sys.stdout.buffer.flush()
+            if 0 in ready:
+                data = os.read(0, 16384)
+                if not data:
+                    inputs.remove(0)
+                    data = b'\x04'
+                sock.sendall(struct.pack('!BI', 1, len(data)) + data)
+    finally:
+        if previous is not None:
+            termios.tcsetattr(0, termios.TCSANOW, previous)
+
+
+def main():
+    method, params = request(sys.argv[1:])
+    path = os.environ.get('PAPPAI_TERMINAL_SOCKET')
+    token = os.environ.get('PAPPAI_TERMINAL_TOKEN')
+    if not path or not token:
+        raise ValueError('Open a pappai web terminal to run this command')
+    cols, rows = size = geometry()
+    message = json.dumps({'method': method, 'params': params, 'token': token, 'cols': cols, 'rows': rows}).encode()
+    if len(message) > 65536:
+        raise ValueError('Terminal request is too large')
+    with socket.socket(socket.AF_UNIX) as sock:
+        sock.connect(path)
+        sock.sendall(struct.pack('!I', len(message)) + message)
+        if method == 'cli':
+            return relay(sock, size)
+        print(json.dumps(frame(sock)['result'], ensure_ascii=False))
+        return 0
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except (ValueError, OSError, KeyError) as error:
+        print('pappai:', error, file=sys.stderr)
+        sys.exit(1)
+    except KeyboardInterrupt:
+        sys.exit(130)

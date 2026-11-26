@@ -5,6 +5,7 @@
 !package-lock.json
 !src/*.ts
 !src/*.py
+!src/pappai
 !scripts/install-web.mjs
 !scripts/prepare-runner.mjs
 !scripts/runner-storage.mjs

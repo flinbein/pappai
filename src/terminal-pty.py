@@ -41,7 +41,10 @@ def run():
     if size > 65536:
         raise ValueError('Terminal command is too long')
     try:
-        argv = shlex.split(command_bytes(size).decode())
+        launch = json.loads(command_bytes(size))
+        argv = launch.get('argv')
+        if argv is None:
+            argv = shlex.split(launch['command'])
         if not argv:
             raise ValueError('Terminal command is empty')
     except ValueError as exc:
@@ -58,7 +61,7 @@ def run():
         try:
             signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})
             fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack('HHHH', rows, cols, 0, 0))
-            os.execvp(argv[0], argv)
+            os.execvpe(argv[0], argv, {**os.environ, **launch['env']})
         except BaseException as exc:
             os.write(report, str(exc).encode(errors='replace')[:2048])
         os._exit(127)

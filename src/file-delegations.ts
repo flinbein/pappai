@@ -10,7 +10,7 @@ import { sandboxPrivateTmp } from './sandbox.ts';
 import type { Store } from './store.ts';
 
 type FileGrants = Record<FileMode, string[]>;
-type FileView = ReturnType<Store['fileSnapshot']> & {unmappedTmp?:boolean; revoked?:boolean};
+export type FileView = ReturnType<Store['fileSnapshot']> & {unmappedTmp?:boolean; revoked?:boolean; scratch?:{path:string;source:string}};
 type Call = {
   actor: string; target: string; executor?: string; callerView?: FileView; grants: FileGrants;
   abort: AbortController; handles: Map<string, Handle>; copies: number;
@@ -61,13 +61,13 @@ export class FileDelegations {
 
   constructor(store: Pick<Store, 'fileSnapshot'>) { this.store = store; }
 
-  callOpened(id: string, actor: string, target: string, params: any, callerExecutor?: string) {
+  callOpened(id: string, actor: string, target: string, params: any, callerExecutor?: string, terminalView?:FileView) {
     const grants = parseGrants(params);
     if (Object.values(grants).some(paths => paths.length)) {
       if (process.platform !== 'linux') throw Error('Delegated files require Linux');
       const endpoint = callerExecutor ? this.endpoints.get(callerExecutor) : undefined;
       if (callerExecutor && (!endpoint?.view || endpoint.app !== actor)) throw Error('Unknown caller file view');
-      this.calls.set(id, {actor, target, grants, callerView:endpoint?.view,
+      this.calls.set(id, {actor, target, grants, callerView:endpoint?.view ?? terminalView,
         abort: new AbortController(), copies: 0, handles: new Map()});
     }
   }
@@ -147,8 +147,10 @@ export class FileDelegations {
     // cannot authorize opening the host /tmp of an older trusted process.
     if (path.startsWith('/tmp/') && (mounted?.unmappedTmp || mounted?.sandbox === null && current.sandbox !== null))
       throw Error('File access denied');
-    const actual = path.startsWith('/tmp/') && (mounted ?? current).sandbox !== null
+    const scratch=mounted?.scratch;
+    let actual = path.startsWith('/tmp/') && (mounted ?? current).sandbox !== null
       ? join(sandboxPrivateTmp(actor), path.slice('/tmp/'.length)) : path;
+    if (scratch && path.startsWith(scratch.path+'/')) actual=join(scratch.source,path.slice(scratch.path.length+1));
     // Host paths, especially private tmp backing directories, stay off the wire.
     const canCreate = mode !== 'read' && allows(posix.dirname(path), true);
     if (mode === 'create' && !canCreate) throw Error('File creation denied');
@@ -156,13 +158,13 @@ export class FileDelegations {
     catch (err) { throw Error((err as NodeJS.ErrnoException).code ?? 'Expected an ordinary file'); }
   }
 
-  readProfileFile(actor:string, path:string, workerId?:string) {
+  readProfileFile(actor:string, path:string, workerId?:string, terminalView?:FileView) {
     const endpoint=workerId ? this.endpoints.get(workerId) : undefined;
     if (workerId && (!endpoint?.view || endpoint.app!==actor)) throw Error('Unknown caller file view');
     let fd:number;
-    if (process.platform==='linux') fd=this.open(actor,filePath(path),'read',endpoint?.view);
+    if (process.platform==='linux') fd=this.open(actor,filePath(path),'read',endpoint?.view ?? terminalView);
     else {
-      if (workerId || this.store.fileSnapshot(actor).sandbox!==null || typeof path!=='string' || !isAbsolute(path))
+      if (workerId || terminalView || this.store.fileSnapshot(actor).sandbox!==null || typeof path!=='string' || !isAbsolute(path))
         throw Error('File access denied');
       fd=openReadFile(path,()=>true);
     }

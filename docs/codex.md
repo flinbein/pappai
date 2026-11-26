@@ -4,12 +4,21 @@ As an administrator, open **Add runner** on the workspace, select **npm** and in
 
 ## From the web panel
 
-1. Open **Runners**. If `codex` is already available, continue to the tree. Otherwise choose **Add runner**, check the installed entrypoint and native CLI paths, and register it. Registration starts the installed runner.
+1. Select the workspace and open **Add runner**. If `codex` is already installed, proceed to the next step.
 2. Select the workspace in the tree. Choose **Create TEAM** and give the team a name. The panel selects the new team. Choose **Create PROFILE** inside it.
-3. On the PROFILE, open **Profile settings**, enter the server-side path of your prepared Codex `auth.json` and choose **Import Codex credentials**. The controller resolves the path using your signed-in user's filesystem permissions.
+3. Open **codex.authorize** on the PROFILE and run it. Visit the verification URL printed in the terminal and enter its code there. When the terminal exits with code 0, call `codex.status` with `{}` on the same PROFILE and check for `{"configured":true}`. This works on a newly created, stopped PROFILE. Successful authorization replaces any previous credentials for that runner on this PROFILE.
 4. Select the TEAM again and create **APP · Codex**. Choose the PROFILE you created. This template declares a persistent agent with message, history and interrupt methods. The permissions editor defaults to `[]`. Grant workspace permissions separately when the agent needs tools.
 5. Return to the PROFILE and open its settings. Choose the new APP in the scope dropdown, save the scope, then enable the profile. The dropdown appends the selected ID to the rules shown in the editor.
 6. Select the APP. Under **Manage APP**, choose **Start**. Open **Message agent** to send a message and read the reply. To read earlier messages, select `agent.getHistory` under **Methods and help** and call it with `{}`.
+
+You can also start the same interactive login inside an existing pappai terminal:
+
+```sh
+pappai cli PROFILE_ID codex.authorize
+pappai call PROFILE_ID codex.status '{}'
+```
+
+The USER needs the `cli` permission for `codex.authorize`, ordinary method permissions for `codex.setup` and `codex.status`, and network access for device login. Use your normal USER terminal when starting this command. If an administrator explicitly checks **Run in sandbox** on an ordinary terminal, that minimal sandbox disables networking for its nested commands. To import an existing file instead, use **Profile settings → Import Codex credentials**. For aliased installations, substitute the registered runner name for `codex`.
 
 ## Equivalent method calls
 

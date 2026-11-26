@@ -283,6 +283,9 @@ export class Store {
   allows(actor: string,target: string,method: string,data?:unknown) {
     return typeof method === 'string' && !!method && this.permitted(actor,target,'methods',method,data);
   }
+  allowsCli(actor:string,target:string,feature:string,input:unknown) {
+    return this.permitted(actor,target,'cli',feature,input);
+  }
   allowsEvent(receiver:string,source:string,event:string,data?:unknown) {
     return this.permitted(receiver,source,'events',event,data);
   }

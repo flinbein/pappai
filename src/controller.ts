@@ -1,3 +1,4 @@
+import type { FileView } from './file-delegations.ts';
 import { randomUUID } from 'node:crypto';
 import type { EventEmitter } from 'node:events';
 import { prepare } from './manifest.ts';
@@ -25,7 +26,8 @@ type Runner = Pick<EventEmitter,'on'> & Pick<ProcessRunner,'dispatch'|'stop'|'re
 export type ControllerHooks = {
   system?:(actor:string,node:NonNullable<ReturnType<Store['get']>>,method:string,data:any)=>{handled:boolean;result?:any}|undefined;
   systemNames?:(type:NonNullable<ReturnType<Store['get']>>['type'])=>string[];
-  profileCall?:(actor:string,profileId:string,method:string,data:any,callerWorkerId?:string,signal?:AbortSignal,timeoutMs?:number)=>Promise<unknown>;
+  profileCall?:(actor:string,profileId:string,method:string,data:any,callerWorkerId?:string,signal?:AbortSignal,timeoutMs?:number,callerView?:FileView)=>Promise<unknown>;
+  profileCliFeatures?:()=>Map<string,{type:'cli';version:string;description:string;doc?:string;schema?:{input?:unknown}}>;
   profileFeatures?:()=>string[];
   workspaceFeatures?:()=>Map<string,{type:string;description:string;version:string;schema?:unknown}>;
   workspaceCall?:(actor:string,method:string,data:unknown,signal?:AbortSignal,timeoutMs?:number)=>Promise<unknown>;
@@ -36,7 +38,7 @@ export type ControllerHooks = {
   executorProfileRevoked?:(workerId:string)=>void;
   executorRetire?:(workerId:string,appId:string)=>void;
   executorExit?:(workerId:string,appId:string)=>void;
-  callOpened?:(id:string,actor:string,target:string,params:any,callerWorkerId?:string)=>void;
+  callOpened?:(id:string,actor:string,target:string,params:any,callerWorkerId?:string,callerView?:FileView)=>void;
   callAssigned?:(id:string,workerId:string)=>void;
   callClosed?:(id:string)=>void;
   unfinished?:(id:string)=>boolean;
@@ -396,10 +398,10 @@ export class Controller {
     }
     if (!worker.persistent && queue.length && this.store.get(appId)?.status === 'working') this.next(appId);
   }
-  async call(actor:string,params:any,signal?:AbortSignal):Promise<any> {
-    return this.invoke(actor,params,signal);
+  async call(actor:string,params:any,signal?:AbortSignal,callerView?:FileView):Promise<any> {
+    return this.invoke(actor,params,signal,undefined,callerView);
   }
-  private async invoke(actor:string,params:any,signal?:AbortSignal,worker?:Worker):Promise<any> {
+  private async invoke(actor:string,params:any,signal?:AbortSignal,worker?:Worker,callerView?:FileView):Promise<any> {
     if (this.closing) throw Error('Controller shutting down');
     const {node:appId,method,data,version} = params;
     if (typeof appId !== 'string' || typeof method !== 'string') throw Error('Expected node and method');
@@ -410,7 +412,7 @@ export class Controller {
     const app = this.store.get(appId);
     if (!app) throw Error('Node not found');
     if (app.type==='profile' && !method.startsWith('$.') && this.hooks.profileCall)
-      return this.hooks.profileCall(actor,app.id,method,data ?? {},worker?.id,signal,params.timeoutMs);
+      return this.hooks.profileCall(actor,app.id,method,data ?? {},worker?.id,signal,params.timeoutMs,callerView);
     if (app.type==='workspace' && method.startsWith('runners.') && this.hooks.workspaceCall)
       return this.hooks.workspaceCall(actor,method,data ?? {},signal,params.timeoutMs);
     if (method.startsWith('$.')) return this.system(actor,app,method,data ?? {});
@@ -442,7 +444,7 @@ export class Controller {
       this.finish(id,Error(issue));
     };
     const abort = () => cancel('Call cancelled');
-    this.hooks.callOpened?.(id,actor,appId,params,worker?.id);
+    this.hooks.callOpened?.(id,actor,appId,params,worker?.id,callerView);
     try {
       return await new Promise((resolve,reject) => {
         const timer = setTimeout(()=>cancel('Call timed out'),timeout);
@@ -689,6 +691,11 @@ export class Controller {
         version: '1',
         description: systemDescription(name),
       });
+    if (app.type==='profile') {
+      for (const [name,feature] of this.hooks.profileCliFeatures?.() ?? []) {
+        if (!entries.has(name)) entries.set(name,feature);
+      }
+    }
     const events = app.type === 'app' ? appEvents : app.type === 'workspace' ? ['$.workspace.init'] : ['$.node.created','$.node.permissions.updated'];
     for (const name of events) entries.set(name,{type:'event',version:'1',description:systemDescription(name)});
     const names = [...entries.keys()];

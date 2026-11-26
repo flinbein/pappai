@@ -292,7 +292,8 @@ function startInstallation(platform, workspace, privateData) {
 }
 try {
   if (process.env.PAPPAI_BROWSER_WEB_PACKAGE) activateWebRelease(bundledVersion);
-  docker("build","-t",runId,".");
+  if (process.env.PAPPAI_BROWSER_IMAGE) docker("tag",process.env.PAPPAI_BROWSER_IMAGE,runId);
+  else docker("build","-t",runId,".");
   imageBuilt = true;
   const platform = volume("platform"), workspace = volume("workspace"), privateData = volume("private");
   startInstallation(platform,workspace,privateData);
@@ -314,6 +315,21 @@ try {
   await exerciseRunnerInstaller(admin,inContainer,background,withCodex);
   if (withCodex) await exerciseCodexPanel(admin,inContainer,background);
   const call = (node,method,data)=>rpc(admin,"call",{node,method,data});
+  if (!withCodex) {
+    const {id}=await call('~','$.profile.create',{name:'Terminal fixture'});
+    await admin.locator('[data-node="'+id+'"]').click();
+    await admin.locator('[data-cli-method="probe.verify"]').click();
+    await admin.getByRole('button',{name:'Run',exact:true}).click();
+    await assertTerminalState(admin.locator('.terminal-tab[data-terminal][aria-selected=true]'),'closed');
+    await admin.locator('.terminal-frame:not([hidden]) .xterm-rows').getByText(/probe.verify/).first().waitFor();
+    await admin.locator('#nav-terminal').click();
+    const group=admin.locator('[data-cli-group]');
+    await group.waitFor();
+    if (await group.getAttribute('aria-expanded')==='true') await group.click();
+    await admin.locator('[data-close-group]').click();
+    await group.waitFor({state:'detached'});
+    console.log('PASS: PROFILE CLI launch in a real PTY, terminal RPC and shared group');
+  }
   const observer = await observePanel(admin.context(), origin);
   const {id:team} = await call("~","$.team.create",{name:"Acceptance",permissions:null});
   await observer.page.locator(`[data-node="${team}"]`).waitFor();
@@ -472,6 +488,7 @@ try {
   assert.doesNotMatch(await activeRows.textContent(), /isolatedenvironment/);
   assert.equal(sockets.length, 2);
   const secondaryClosed = sockets[1].waitForEvent('close');
+  directTab.once('dialog', dialog => dialog.accept());
   await second.close.click();
   await secondaryClosed;
   await second.tab.waitFor({state:'detached'});

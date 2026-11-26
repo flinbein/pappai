@@ -19,3 +19,12 @@ Read and replace rules with `$.node.permissions.get` and `$.node.permissions.set
 File `write` permits reading and writing. Denying `read` removes both. Denying `write` removes writing. Put narrow exceptions before broad rules. Paths may identify files or directories. Sandbox mount targets must exist at launch. The directory administrator must preserve the name, type and location of each mount point. A running process keeps its mounted paths and network mode for the lifetime of that process.
 
 `network` enables process network access. The separate `http` permission allows incoming public HTTP requests. Binding an authorization PROFILE preserves the APP's effective permissions for its own work. Profile-defined MCP connections also require the relevant permissions of the selected PROFILE. See [Codex APPs](codex.md) and [webhook configuration](webhook.md).
+
+Use `cli` to allow a USER to launch an interactive feature on a matching node. It supports the same name selectors, input schemas and ordered deny rules as `methods`. Calls made by the interactive program undergo their own method checks. For example, the following grants device login on one PROFILE. Include a discover rule if the user needs to find the PROFILE in the panel.
+
+```json
+[
+  {"node":"PROFILE_ID","discover":true,"cli":"codex.authorize","methods":["codex.setup","codex.status"]},
+  {"network":true}
+]
+```

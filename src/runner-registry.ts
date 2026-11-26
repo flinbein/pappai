@@ -1,8 +1,9 @@
+import type { FileView } from './file-delegations.ts';
 import { EventEmitter } from 'node:events';
 import { existsSync, renameSync, rmSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { join, resolve, sep } from 'node:path';
-import { checkedEntrypoint, installationDirectory, preparedRelease, runnerContract, type RunnerMethod } from './runner-installation.ts';
+import { checkedEntrypoint, cliLaunchPlan, installationDirectory, preparedRelease, runnerContract, type ProfileCli, type RunnerMethod } from './runner-installation.ts';
 import { withRunnerLock } from '../scripts/runner-storage.mjs';
 import { pathToFileURL } from 'node:url';
 import { ProcessRunner, type Assignment, type InputRecord } from './runner.ts';
@@ -18,8 +19,40 @@ export class RunnerRegistry extends EventEmitter {
   private profiles = new ProfileMethods();
   setProfileReader(reader:ProfileReader) { this.profiles.reader=reader; }
   profileFeatures() { return this.profiles.names(); }
-  profileCall(actor:string,profileId:string,method:string,data:unknown,workerId?:string,signal?:AbortSignal,timeoutMs?:number) {
-    return this.profiles.call(actor,profileId,method,data,workerId,signal,timeoutMs);
+  profileCliFeatures() {
+    const features=new Map<string,ProfileCli>();
+    const methods=new Set(this.profileFeatures());
+    for (const [runner,contract] of this.contracts) {
+      if (!this.available(runner)) continue;
+      for (const [key,feature] of contract.profileCli) {
+        const name=runner+'.'+key;
+        if (!methods.has(name)) features.set(name,feature);
+      }
+    }
+    return features;
+  }
+  async prepareCli(actor:string,node:string,method:string,input:unknown,signal?:AbortSignal) {
+    const permitted=()=>this.store.allowsCli(actor,node,method,input);
+    if (!permitted()) throw Error('Permission denied');
+    const [name,...parts]=method.split('.');
+    const key=parts.join('.');
+    const host=this.hosts.get(name), feature=this.profileCliFeatures().get(method);
+    if (this.store.get(node)?.type!=='profile' || !feature || !host) throw Error('CLI feature unavailable');
+    if (!input || typeof input!=='object' || Array.isArray(input) || Object.keys(input).some(k=>k!=='args' && k!=='env') ||
+        ('args' in input && (!Array.isArray(input.args) || input.args.some(arg=>typeof arg!=='string' || arg.includes('\0')))) ||
+        ('env' in input && (!input.env || typeof input.env!=='object' || Array.isArray(input.env) ||
+          Object.entries(input.env).some(([k,v])=>!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k) || typeof v!=='string' || v.includes('\0')))))
+      throw Error('Expected CLI arguments and environment');
+    if (feature.schema?.input!==undefined && !compilePolicySchema(feature.schema.input)(input))
+      throw Error('CLI input does not match schema');
+    const reply=await host.adminCall('@cli.prepare',{feature:key,node,input},signal,15_000);
+    if (!permitted()) throw Error('Permission denied');
+    if (this.closing || this.hosts.get(name)!==host || !this.available(name) || signal?.aborted)
+      throw Error('CLI launch cancelled');
+    return cliLaunchPlan(this.root,name,reply);
+  }
+  profileCall(actor:string,profileId:string,method:string,data:unknown,workerId?:string,signal?:AbortSignal,timeoutMs?:number,callerView?:FileView) {
+    return this.profiles.call(actor,profileId,method,data,workerId,signal,timeoutMs,callerView);
   }
   private store:Store;
   private hosts=new Map<string,ProcessRunner>();

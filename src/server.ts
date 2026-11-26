@@ -9,6 +9,7 @@ import { initTempRoot } from './sandbox.ts';
 import { AppHttpSockets, createAppHttpRouter } from './app-http.ts';
 import { ManifestSources } from './manifest-sources.ts';
 import { FileDelegations } from './file-delegations.ts';
+import type { FileView } from './file-delegations.ts';
 import { serveUserFiles } from './file-browser.ts';
 import { attachEvents } from './events.ts';
 import { Controller } from './controller.ts';
@@ -61,6 +62,7 @@ export function createService({ db, origin, webRoot = process.env.PAPPAI_WEB_ROO
     executorRequest:files.executorRequest.bind(files),
     manifestChanged:id=>sources.manifestChanged(id), beforeRestart:id=>sources.applyPending(id),
     profileFeatures:()=>runner.profileFeatures(),
+    profileCliFeatures:()=>runner.profileCliFeatures(),
     workspaceFeatures:()=>runner.workspaceFeatures(),
     workspaceCall:(...args)=>runner.workspaceCall(...args),
     isCodex:name=>runner.isCodex(name),
@@ -76,10 +78,10 @@ export function createService({ db, origin, webRoot = process.env.PAPPAI_WEB_ROO
       return sources.system(actor,node,method,data);
     },
   });
-  runner.setProfileReader((actor,path,worker)=>{
+  runner.setProfileReader((actor,path,worker,view)=>{
     if (store.get(actor)?.status!=='working' || (worker && !controller.isCurrentExecutor(actor,worker)))
       throw Error('Inactive caller');
-    return files.readProfileFile(actor,path,worker);
+    return files.readProfileFile(actor,path,worker,view);
   });
   sources = new ManifestSources(store,{
     validateSettings:(name,settings)=>runner.validateSettings(name,settings),
@@ -101,6 +103,15 @@ export function createService({ db, origin, webRoot = process.env.PAPPAI_WEB_ROO
     if(app.status!=='working') return null;
     return store.hasHttp(app.id) ? sockets.socket(app.id) : undefined;
   });
+  function rpc(actor:string,method:string,params:any,signal:AbortSignal,view?:FileView) {
+    switch (method) {
+      case 'discover': return store.visible(actor);
+      case 'help': return controller.help(actor,params);
+      case 'call': return controller.call(actor,params,signal,view);
+      case 'publish': return controller.publish(actor,params,undefined,signal);
+      default: throw Error('Unknown RPC method');
+    }
+  }
   const server = createServer(async (req, res) => {
     const path = (req.url ?? '/').split('?')[0];
     if (req.headers.host !== address.host) {
@@ -165,23 +176,7 @@ export function createService({ db, origin, webRoot = process.env.PAPPAI_WEB_ROO
       res.once('close', () => {
         if (!res.writableEnded) cancel.abort();
       });
-      let result;
-      switch (request.method) {
-        case 'discover':
-          result = store.visible(actor);
-          break;
-        case 'help':
-          result = controller.help(actor, params);
-          break;
-        case 'publish':
-          result = await controller.publish(actor, params, undefined, cancel.signal);
-          break;
-        case 'call':
-          result = await controller.call(actor, params, cancel.signal);
-          break;
-        default:
-          throw Error('Unknown RPC method');
-      }
+      const result=await rpc(actor,request.method,params,cancel.signal);
       res.end(JSON.stringify({ jsonrpc: '2.0', id, result: result ?? null }));
     } catch (error) {
       if (!res.destroyed && !res.writableEnded)
@@ -194,7 +189,10 @@ export function createService({ db, origin, webRoot = process.env.PAPPAI_WEB_ROO
         );
     }
   });
-  const terminals = attachTerminals(server, address, store, auth.user);
+  const terminals = attachTerminals(server, address, store, auth.user, {
+    prepareCli:runner.prepareCli.bind(runner),
+    rpc:async (actor,method,params,view,signal)=>rpc(actor,method,params,signal,view),
+  });
   const events = attachEvents(server,address,store,auth.user,controller);
   async function close() {
     const closed = new Promise<void>((resolve) => server.close(() => resolve()));
