@@ -520,6 +520,15 @@ try {
   assert.equal(await failed.tab.locator('.terminal-tab-dot').getAttribute('title'), 'error');
   await admin.locator('.terminal-frame:not([hidden]) [role=alert]').filter({hasText:/No such file/}).waitFor();
   assert.equal(await admin.locator('.terminal-frame:not([hidden]) .xterm').count(), 0);
+  const errorFrame = '.terminal-failed-frame:not([hidden])';
+  const box = await admin.locator(errorFrame).boundingBox();
+  await admin.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await admin.mouse.wheel(-150, 0);
+  await completed.tab.and(admin.locator('[aria-selected=true]')).waitFor({timeout:3000});
+  await failed.tab.click();
+  await admin.locator('.terminal-track:not([data-moving])').waitFor();
+  await touchStroke(admin, errorFrame, -150, 0, 2);
+  await admin.locator('#new-terminal[aria-selected=true]').waitFor({timeout:3000});
   await completed.tab.click();
   await admin.locator('.terminal-frame:not([hidden]) .xterm-rows').getByText('[two words][][$HOME]', {exact:true}).waitFor();
   for (const session of [failed, completed, optional]) {

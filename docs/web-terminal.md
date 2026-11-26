@@ -36,7 +36,7 @@ Tap ☰ to switch to Copy, Paste, A+, A−, theme and fullscreen. Tap ⌨ to ret
 
 Copying with no selection opens a read-only snapshot at the current scroll position. Use the system selection handles, **Copy selected** or **Copy all**. Escape, **×**, a two-finger tap or double Shift returns to the terminal. If the browser denies clipboard access, the paste action opens a text field for the system paste menu. Pasted line breaks are sent to the terminal.
 
-Swipe horizontally with two fingers on the terminal or a trackpad to move between tabs and the launch form. The carousel stops at each end. Pinching on a trackpad or touchscreen adjusts the terminal font.
+Swipe horizontally with two fingers on the terminal or a trackpad to move between tabs and the launch form. On a tab with a startup error, the gesture works across the entire pane, including the empty area below the message. The carousel stops at each end. Pinching on a trackpad or touchscreen adjusts the terminal font.
 
 Use **Ctrl+Shift+Enter**, a three-finger tap or the fullscreen button to toggle fullscreen. Fullscreen shows only the terminal and its optional toolbar. With a restricted permission chain, the terminal uses bubblewrap with the USER's effective file and network permissions. Its working directory and `HOME` are the user's private `/tmp`, shared between that user's sandboxes. With a fully trusted chain of `permissions: null`, the regular terminal starts in `/root` with the rights of the pappai process inside the container. The sandbox option for such users provides read-only base system directories, a writable private `/tmp` and no external network.
 
