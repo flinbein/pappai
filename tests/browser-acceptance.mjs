@@ -296,6 +296,49 @@ async function checkSharedTerminal(owner, first, second, socket) {
   await viewer.locator(frame+' .xterm-rows').getByText('sharedhistory',{exact:true}).waitFor();
   await tab(firstId).getByText('First shell',{exact:true}).waitFor();
   await tab(secondId).getByText('Second shell',{exact:true}).waitFor();
+  // Wheel input can target an unfocused Chrome window on desktop.
+  await owner.bringToFront();
+  await active(owner).waitFor();
+  await checkViewer(viewer);
+  assert.equal(await viewer.evaluate(() => document.hasFocus()),false);
+  const area = await viewer.locator(screen).boundingBox();
+  await viewer.mouse.move(area.x+area.width/2,area.y+area.height/2);
+  await viewer.mouse.wheel(150,0);
+  await tab(secondId).and(viewer.locator('[aria-selected=true]')).waitFor();
+  await active(viewer).waitFor({timeout:3000});
+
+  // Record every ownership request, including a transient one before a click.
+  await viewer.evaluate(() => {
+    const post = MessagePort.prototype.postMessage;
+    window.takeRequests = [];
+    MessagePort.prototype.postMessage = function(message,...args) {
+      if (message?.type === 'terminal.take') window.takeRequests.push(message.id);
+      return post.call(this,message,...args);
+    };
+  });
+  for (const target of [tab(secondId), viewer.locator('#new-terminal')]) {
+    await viewer.bringToFront();
+    await tab(firstId).click();
+    await active(viewer).waitFor();
+    await owner.bringToFront();
+    await active(owner).waitFor();
+    await checkViewer(viewer);
+    await viewer.evaluate(() => { window.takeRequests.length = 0; });
+    const box = await target.boundingBox();
+    await viewer.mouse.move(box.x+box.width/2,box.y+box.height/2);
+    await viewer.bringToFront();
+    await pauseForPaint(viewer);
+    await viewer.mouse.down();
+    await sleep(350); // The click can finish after the focus delay expires.
+    await viewer.mouse.up();
+    await target.and(viewer.locator('[aria-selected=true]')).waitFor();
+    await sleep(300);
+    const requests = await viewer.evaluate(() => window.takeRequests);
+    assert.ok(!requests.includes(Number(firstId)), 'Raising the window to choose another tab must preserve ownership of A');
+    await active(owner).waitFor();
+  }
+  await tab(firstId).click();
+  await active(viewer).waitFor();
   for (const page of [owner,viewer]) {
     await page.bringToFront();
     for (const gesture of ['wheel','touch']) {
