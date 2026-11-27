@@ -112,6 +112,10 @@ test('profile HTTP MCP uses both network permits and revalidates running assignm
   assert.deepEqual(denied.settings.mcp.profile ?? [],[]);
   runner.emit('exit',denied);
   const proc=await go(processApp.id), localJob=await go(local.id);
+  // New launches and RPCs use current policy. An ordinary mount change does
+  // not retire an existing process merely because it uses a PROFILE.
+  await call(processApp.id,'$.permissions.set',{permissions:[]});
+  assert.deepEqual(stops,[]);
   // The profile grants network only when used by this APP.
   await call(profile.id,'$.permissions.set',{permissions:[{node:agent.id,network:true}]});
   const enabled=await go(agent.id);

@@ -106,7 +106,8 @@ export function attachEvents(server:Server, address:URL, store:Store, user:UserS
             }
           } else switch(request.method) {
             case 'help': result=controller.help(actor,params); break;
-            case 'discover': result=store.visible(actor); break;
+            case 'discover': result=controller.discover(actor,params); break;
+            case 'checkPermissions': result=controller.checkPermissions(actor,params); break;
             case 'publish':
               result=await controller.publish(actor,params,delivery=>send({jsonrpc:'2.0',method:'delivery',params:delivery}),life.signal);
               break;

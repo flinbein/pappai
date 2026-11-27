@@ -15,6 +15,7 @@ export type Rule = {
   events?: MessageSelector;
   discover?: boolean;
   delivery?: boolean;
+  checkPermissions?: boolean;
   network?: boolean;
   http?: boolean;
   read?: PathSelector;
@@ -24,7 +25,7 @@ export type Rule = {
 export type Permissions = Rule[] | null;
 
 const nodeTypes = ['workspace', 'team', 'user', 'app', 'profile'];
-const knownFields = new Set(['node','nodeType','methods','cli','events','discover','delivery','network','http','read','write','deny']);
+const knownFields = new Set(['node','nodeType','methods','cli','events','discover','delivery','checkPermissions','network','http','read','write','deny']);
 const nodePattern = /^(?:@|(?:~|[A-Za-z0-9_-]+|\.|\.\.(?:\/\.\.)*)(?:\/(?:\*{1,2}|&))?)$/;
 
 function list<T>(value: T | T[]): T[] {
@@ -88,13 +89,13 @@ function checkExistingComponents(path: string) {
   }
 }
 
-export function validatePermissions(value: unknown): asserts value is Permissions {
+export function validatePermissions(value: unknown, checkFilesystem = true): asserts value is Permissions {
   if (value === null) return;
   if (!Array.isArray(value)) throw new Error('Permissions must be an array or null');
   for (const rule of value) {
     if (!rule || typeof rule !== 'object' || Array.isArray(rule) ||
         Object.keys(rule).some(k => !knownFields.has(k))) throw new Error('Unsupported permission rule');
-    for (const field of ['discover','delivery','network','http','deny']) {
+    for (const field of ['discover','delivery','checkPermissions','network','http','deny']) {
       if (field in rule && typeof rule[field] !== 'boolean') throw new Error('Invalid ' + field + ' permission');
     }
     if ('node' in rule && !validNodes(rule.node)) throw new Error('Unsupported node selector');
@@ -108,7 +109,7 @@ export function validatePermissions(value: unknown): asserts value is Permission
       if (field in rule && !validPaths(rule[field])) throw new Error('Invalid ' + field + ' path');
       for (const path of paths(rule[field])) {
         if (['/proc','/dev','/sys','/tmp','/run'].some(root => contains(root,path))) throw Error('Reserved system path');
-        checkExistingComponents(path);
+        if (checkFilesystem) checkExistingComponents(path);
       }
     }
   }
@@ -150,7 +151,7 @@ export function matchesName(filter: NameSelector | undefined, method: string): b
   });
 }
 
-export type Capability = 'methods'|'cli'|'events'|'http'|'network'|'delivery'|'discover';
+export type Capability = 'methods'|'cli'|'events'|'http'|'network'|'delivery'|'discover'|'checkPermissions';
 export function allowsAtLevel(rules: Permissions, owners: string[], targets: string[], targetType: NodeType,
     actorId: string, method?: string, capability: Capability = method === undefined ? 'discover' : 'methods',
     data?: unknown, resolve?: ResolveNodes, member?: (team:string,id:string)=>boolean): boolean {
@@ -227,3 +228,21 @@ export function filesystemProfile(...subjects: Permissions[][][]) {
   return {read,write,network:subjects.every(networkAllowed),...(hide.length ? {hide} : {})};
 }
 export function sandboxFor(chain: Permissions[]) { return filesystemProfile([chain]); }
+
+// A child can inherit only the mount modes its parent actually received. A
+// read-only exception also stops a broader writable mount from granting writes.
+export function mountedPermissions(sandbox: NonNullable<ReturnType<typeof filesystemProfile>>): Rule[] {
+  const mounts = [
+    ...sandbox.read.map(path => ({path, mode: 'read'})),
+    ...sandbox.write.map(path => ({path, mode: 'write'})),
+    ...(sandbox.hide ?? []).map(path => ({path, mode: 'hide'})),
+  ].sort((a,b) => b.path.length-a.path.length);
+  const rules: Rule[] = [];
+  for (const {path,mode} of mounts) {
+    if (mode === 'hide') rules.push({read:path,deny:true});
+    else if (mode === 'write') rules.push({write:path});
+    else rules.push({read:path}, {write:path,deny:true});
+  }
+  if (sandbox.network) rules.push({network:true});
+  return rules;
+}

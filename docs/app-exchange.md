@@ -56,7 +56,7 @@ A connection subscription has a unique string `id`, an optional source selector 
 
 Use `subscriptions.add` or `subscriptions.set` with `{subscriptions: [...]}`, `subscriptions.delete` with `{ids: [...]}`, and `subscriptions.get` with `{}`. Subscription changes take effect before the controller processes the next request on that connection. A successful add followed immediately by a call can produce an event before the call's response. Match responses by request ID.
 
-The connection supports `discover`, `help`, `call`, `publish` and `cancel`. To cancel an outstanding `call` with ID 42 on that connection, pass `{"id":42}` to `cancel`. Disconnecting cancels outstanding calls. A command may already have taken effect. After reconnecting, register active listeners and fetch a fresh snapshot with `discover`. The controller does not replay missed events.
+The connection supports `discover`, `help`, `call`, `checkPermissions`, `publish` and `cancel`. See [checking and narrowing permissions](permissions.md#checking-and-narrowing-permissions) for the restriction fields and an example. To cancel an outstanding `call` with ID 42 on that connection, pass `{"id":42}` to `cancel`. Disconnecting cancels outstanding calls. A command may already have taken effect. After reconnecting, register active listeners and fetch a fresh snapshot with `discover`. The controller does not replay missed events.
 
 ## Delivery reports
 

@@ -45,6 +45,35 @@ function signIn(db: DatabaseSync, actor: string) {
   return {Cookie: 'pappai-local-session=test-session'};
 }
 
+test('HTTP and WebSocket RPC apply the same restrictions to discovery, help, calls and permission checks',async t=>{
+  const {send,store,db,port,origin}=await startWeb(t);
+  const actor=store.ensureAdmin('rpc@example.test').id;
+  const headers=signIn(db,actor);
+  const subject=store.create('~','team',{name:'limited',permissions:[{node:'.',discover:true,methods:'$.node.get'}]}).id;
+  const ws=new WebSocket('ws://127.0.0.1:'+port+'/api/ws/web',{origin,headers:{...headers,Host:new URL(origin).host}});
+  await once(ws,'open');
+  t.after(()=>ws.terminate());
+  const http=async (method:string,params:object)=>JSON.parse((await send('/api/rpc','POST',headers,{jsonrpc:'2.0',id:1,method,params})).body);
+  const socket=async (method:string,params:object)=>{
+    const response=once(ws,'message');
+    ws.send(JSON.stringify({jsonrpc:'2.0',id:1,method,params}));
+    return JSON.parse(String((await response)[0]));
+  };
+  const limits={restrictPermissions:[subject]};
+  for (const rpc of [http,socket]) {
+    assert.deepEqual((await rpc('discover',limits)).result.map(n=>n.id),['~',subject]);
+    assert.deepEqual((await rpc('help',{node:'~',...limits})).result,{});
+    assert.ok((await rpc('help',{node:subject,features:'$.permissions.set',...limits})).result['$.permissions.set']);
+    const call={node:subject,method:'$.node.get',data:{}};
+    assert.deepEqual((await rpc('checkPermissions',{subject,action:{type:'call',...call}})).result,{allowed:true});
+    assert.equal((await rpc('call',{...call,...limits})).result.id,subject);
+    assert.deepEqual((await rpc('checkPermissions',{action:{type:'call',...call},permissions:[]})).result,{allowed:false});
+    assert.deepEqual((await rpc('checkPermissions',{action:{type:'read',path:'/tmp/host-input'},...limits})).result,{allowed:false});
+    assert.equal((await rpc('call',{...call,...limits,permissions:[]})).error.message,'Permission denied');
+    assert.equal((await rpc('discover',{restrictPermissions:['missing']})).error.message,'Permission denied');
+  }
+});
+
 test('bundled panel and assets are public; terminal and RPC retain their access checks', async t => {
   const {send} = await startWeb(t);
   const panel = await send('/');

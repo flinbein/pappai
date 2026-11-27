@@ -1,11 +1,12 @@
 import type { FileView } from './file-delegations.ts';
+import type { PermissionContext } from './store.ts';
 import { randomUUID } from 'node:crypto';
 import type { EventEmitter } from 'node:events';
 
 type Host = EventEmitter & { profileSend:(message:object)=>void };
-export type ProfileReader=(actor:string,path:string,workerId?:string,callerView?:FileView)=>Buffer|Promise<Buffer>;
+export type ProfileReader=(actor:string,path:string,workerId?:string,callerView?:FileView,context?:PermissionContext)=>Buffer|Promise<Buffer>;
 type Pending = {
-  host:Host; actor:string; workerId?:string; callerView?:FileView;
+  host:Host; actor:string; workerId?:string; callerView?:FileView; context?:PermissionContext;
   resolve:(value:unknown)=>void; reject:(error:Error)=>void; timer:NodeJS.Timeout; cleanup:()=>void;
 };
 
@@ -45,7 +46,7 @@ export class ProfileMethods {
       };
       void (async()=>{
         if (!this.reader) throw Error('Caller file view unavailable');
-        const bytes=await this.reader(call.actor,path,call.workerId,call.callerView);
+        const bytes=await this.reader(call.actor,path,call.workerId,call.callerView,call.context);
         if (bytes.length>1024*1024) throw Error('Profile input exceeds 1 MiB');
         return bytes.toString('base64');
       })().then(content=>reply({content}),()=>reply({error:'Profile input unavailable or access denied'}));
@@ -57,7 +58,7 @@ export class ProfileMethods {
     for (const [key,owner] of this.methods) if (owner===host) this.methods.delete(key);
     for (const [id,call] of this.pending) if (call.host===host) this.finish(id,undefined,Error('Runner unavailable'));
   }
-  async call(actor:string,profileId:string,method:string,data:unknown,workerId?:string,signal?:AbortSignal,timeoutMs=30_000,callerView?:FileView) {
+  async call(actor:string,profileId:string,method:string,data:unknown,workerId?:string,signal?:AbortSignal,timeoutMs=30_000,callerView?:FileView,context?:PermissionContext,authorize?:()=>void) {
     if (signal?.aborted) throw Error('Profile operation cancelled');
     if (!Number.isInteger(timeoutMs) || timeoutMs<1 || timeoutMs>86_400_000) throw Error('Invalid timeout');
     const starting=this.starting.get(method.split('.')[0]);
@@ -68,6 +69,7 @@ export class ProfileMethods {
       const cancel=()=>this.finish(id,undefined,Error('Profile operation cancelled'));
       const dispatch=()=>{
         if (this.methods.get(method)!==host) return this.finish(id,undefined,Error('Profile method unavailable'));
+        try { authorize?.(); } catch (error) { return this.finish(id,undefined,error as Error); }
         try { host.profileSend({type:'profileCall',id,caller:actor,profileId,method:method.slice(method.indexOf('.')+1),data}); }
         catch { this.finish(id,undefined,Error('Runner unavailable')); }
       };
@@ -77,7 +79,7 @@ export class ProfileMethods {
       };
       const timer=setTimeout(()=>this.finish(id,undefined,Error('Profile operation timed out')),Math.min(timeoutMs,30_000));
       timer.unref();
-      this.pending.set(id,{host,actor,workerId,callerView,resolve,reject,timer,cleanup});
+      this.pending.set(id,{host,actor,workerId,callerView,context,resolve,reject,timer,cleanup});
       signal?.addEventListener('abort',cancel,{once:true});
       if (starting) starting.waiters.add(dispatch); else dispatch();
     });

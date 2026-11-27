@@ -54,7 +54,18 @@ test("register with offline OTP, login without email, logout and admin reset", a
     return { status: r.status, data: await r.json() };
   }
   try {
-    auth = createAuth(db, origin);
+    let emailed;
+    auth = createAuth(db, origin,async (_to,code)=>{emailed=code;});
+    const subject=store.create('~','team',{name:'recovery operator',permissions:[{
+      node:saved.id,methods:['$.user.recovery.send','$.user.passkeys.create']
+    }]}).id;
+    await auth.requestMail(saved.id,saved.id,store.restrict(saved.id,undefined,[subject]));
+    const emailRegistration=await post('/auth/register/options',{email,code:emailed});
+    assert.equal(emailRegistration.status,200);
+    store.manage(saved.id,subject,'$.permissions.set',{permissions:[]});
+    const denied=authenticator(origin,emailRegistration.data.user.id);
+    assert.equal((await post('/auth/register/verify',denied(emailRegistration.data.challenge,true))).status,401);
+    cookies.clear();
     const code = issueCode(db, saved.id);
     assert.equal(code.length,43);
     assert.equal((await post("/auth/register/options",{email:"invalid",code})).status,401);

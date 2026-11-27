@@ -10,14 +10,21 @@ import termios
 import tty
 
 
-USAGE = """Usage (local administrators may prefix any command with -u NODE_ID):
+USAGE = """Usage: pappai [OPTIONS] COMMAND
+  -u, --as NODE_ID           Select a local administrator RPC identity
+  -r, --restrict-to NODE_ID  Add a permission subject (repeatable; also --restrict)
+      --permissions JSON     Intersect with an inline list of permit rules
+      --with-rpc             Give a run child access to the narrowed RPC socket
+
   pappai me
+  pappai checkPermissions JSON
   pappai call NODE METHOD [JSON]
   pappai help [--schema] [--doc] NODE [FEATURE]
   pappai discover [JSON]
   pappai emit EVENT [JSON]
   pappai cli NODE METHOD [JSON]
-  pappai cli NODE METHOD -- [ARG ...]"""
+  pappai cli NODE METHOD -- [ARG ...]
+  pappai [OPTIONS] run PROGRAM [ARG ...]"""
 
 
 def request(args):
@@ -27,6 +34,13 @@ def request(args):
     op, *args = args
     if op == 'me' and not args:
         return op, {}
+    if op == 'checkPermissions' and len(args) == 1:
+        return op, json.loads(args[0])
+    if op == 'run' and args:
+        return op, {'argv': args, 'cwd': os.getcwd(),
+                    'tty': all(os.isatty(fd) for fd in (0, 1, 2)),
+                    'env': {key: os.environ[key] for key in
+                            ('TERM', 'LANG', 'LC_ALL', 'LC_CTYPE', 'COLORTERM') if key in os.environ}}
     if op == 'cli' and len(args) >= 3 and args[2] == '--':
         return op, {'node': args[0], 'method': args[1], 'input': {'args': args[3:]}}
     if op in ('call', 'cli') and len(args) in (2, 3):
@@ -61,15 +75,15 @@ def receive(sock, size):
 
 def frame(sock):
     kind, size = struct.unpack('!BI', receive(sock, 5))
-    if size > 16 * 1024 * 1024 or kind not in (0, 1):
+    if size > 16 * 1024 * 1024 or kind not in (0, 1, 2):
         raise ValueError('Invalid terminal response')
     data = receive(sock, size)
     if kind:
-        return data
+        return kind, data
     status = json.loads(data)
     if 'error' in status:
         raise ValueError(status['error'])
-    return status
+    return kind, status
 
 
 def geometry():
@@ -80,34 +94,47 @@ def geometry():
         return 80, 24
 
 
-def relay(sock, size):
-    started = frame(sock)
-    if not isinstance(started, dict) or not started.get('started'):
+def relay(sock, size, interactive):
+    kind, started = frame(sock)
+    if kind or not started.get('started'):
         raise ValueError('Terminal command did not start')
-    previous = termios.tcgetattr(0) if os.isatty(0) else None
-    inputs = [sock, 0]
+    previous = termios.tcgetattr(0) if interactive and os.isatty(0) else None
+    stdin_open = True
+    outbound = bytearray()
     try:
         if previous is not None:
             tty.setraw(0, termios.TCSANOW)
         while True:
-            ready, _, _ = select.select(inputs, [], [], 0.2)
-            current = geometry()
-            if current != size:
+            inputs = [sock, 0] if stdin_open and not outbound else [sock]
+            ready, writable, _ = select.select(inputs, [sock] if outbound else [], [], 0.2)
+            current = geometry() if interactive else size
+            if current != size and not outbound:
                 cols, rows = size = current
-                sock.sendall(struct.pack('!BIHH', 2, 4, rows, cols))
+                outbound.extend(struct.pack('!BIHH', 2, 4, rows, cols))
             if sock in ready:
-                data = frame(sock)
-                if isinstance(data, dict):
+                kind, data = frame(sock)
+                if kind == 0:
                     code = data['exitCode']
                     return code if code >= 0 else 128 - code
-                sys.stdout.buffer.write(data)
-                sys.stdout.buffer.flush()
+                stream = sys.stdout.buffer if kind == 1 else sys.stderr.buffer
+                stream.write(data)
+                stream.flush()
             if 0 in ready:
                 data = os.read(0, 16384)
+                kind = 1
                 if not data:
-                    inputs.remove(0)
-                    data = b'\x04'
-                sock.sendall(struct.pack('!BI', 1, len(data)) + data)
+                    stdin_open = False
+                    if interactive:
+                        data = b'\x04'
+                    else:
+                        kind = 3
+                outbound.extend(struct.pack('!BI', kind, len(data)) + data)
+            if sock in writable:
+                try:
+                    sent = sock.send(outbound, socket.MSG_DONTWAIT)
+                except BlockingIOError:
+                    continue
+                del outbound[:sent]
     finally:
         if previous is not None:
             termios.tcsetattr(0, termios.TCSANOW, previous)
@@ -115,25 +142,48 @@ def relay(sock, size):
 
 def main():
     args = sys.argv[1:]
-    identity = {}
-    if args[:1] == ['-u']:
-        if len(args) < 3 or not args[1]:
-            raise ValueError('Expected -u NODE_ID COMMAND')
-        identity = {'asNode': args[1]}
-        args = args[2:]
+    options = {}
+    with_rpc = False
+    while args and args[0] in ('-u', '--as', '-r', '--restrict', '--restrict-to', '--permissions', '--with-rpc'):
+        flag = args.pop(0)
+        if flag == '--with-rpc':
+            with_rpc = True
+            continue
+        if not args:
+            raise ValueError('Missing value for ' + flag)
+        value = args.pop(0)
+        if flag in ('-r', '--restrict', '--restrict-to'):
+            options.setdefault('restrictPermissions', []).append(value)
+        else:
+            key = 'permissions' if flag == '--permissions' else 'asNode'
+            if key in options:
+                raise ValueError('Repeated option ' + flag)
+            options[key] = json.loads(value) if key == 'permissions' else value
+    if (options or with_rpc) and not args:
+        raise ValueError('Expected a command')
     method, params = request(args)
+    if method == 'run':
+        params['withRpc'] = with_rpc
+    elif with_rpc:
+        raise ValueError('--with-rpc applies only to run')
     terminal = '/run/pappai/terminal.sock'
     path = terminal if os.path.exists(terminal) else '/run/pappai-admin/rpc.sock'
     cols, rows = size = geometry()
-    message = json.dumps({'method': method, 'params': params, **identity, 'cols': cols, 'rows': rows}).encode()
+    message = json.dumps({'method': method, 'params': params, **options, 'cols': cols, 'rows': rows}).encode()
     if len(message) > 65536:
         raise ValueError('Terminal request is too large')
     with socket.socket(socket.AF_UNIX) as sock:
-        sock.connect(path)
+        try:
+            sock.connect(path)
+        except FileNotFoundError:
+            raise ValueError('pappai RPC is unavailable in this process') from None
         sock.sendall(struct.pack('!I', len(message)) + message)
-        if method == 'cli':
-            return relay(sock, size)
-        print(json.dumps(frame(sock)['result'], ensure_ascii=False))
+        if method in ('cli', 'run'):
+            return relay(sock, size, method == 'cli' or params['tty'])
+        kind, status = frame(sock)
+        if kind:
+            raise ValueError('Expected a terminal RPC result')
+        print(json.dumps(status['result'], ensure_ascii=False))
         return 0
 
 

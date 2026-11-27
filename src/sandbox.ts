@@ -1,7 +1,8 @@
-import { lstatSync, mkdirSync, mkdtempSync, realpathSync, readdirSync, readlinkSync } from 'node:fs';
+import { closeSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, readdirSync, readlinkSync } from 'node:fs';
 import { isAbsolute, join, normalize } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { Assignment, ProcessSettings } from './runner.ts';
+import { enclosingMount, openMountSource } from './file-view.ts';
 
 const baseEnvironment = {PATH: '/usr/local/bin:/usr/bin:/bin', TMPDIR: '/tmp'};
 export function initTempRoot() {
@@ -31,6 +32,16 @@ type TerminalMounts = {
   socket?: string;
   files: number;
   scratch?: {source: string; path: string};
+  privateTmp?: string;
+  sharedCwd?: string;
+  sources: Map<string,number>;
+  parentSources?: ReadonlyMap<string,number>;
+  parentAllowsWrite?: (path:string)=>boolean;
+  passFd(fd:number):number;
+  // Only used while spawning bwrap. These are controller-owned private mount
+  // sources, as distinct from the filesystem grants retained for descendants.
+  setupFds:number[];
+  verifyMounts: {path:string; mode:string; inode?:string; dev?:string}[];
 };
 
 export function sandboxArgs(job: SandboxJob): string[] {
@@ -60,12 +71,15 @@ function buildSandboxArgs(job: SandboxJob, terminal?: TerminalMounts): string[] 
     }
   }
   for (const [path, mode] of [...requested].sort(([a],[b])=>a.length-b.length)) {
-      checkPath(path);
+      if (!terminal) checkPath(path);
       if (path === '/') {
         if (mode !== 'hide') for (const item of readdirSync('/',{withFileTypes:true})) {
           if (['proc','dev','sys','tmp','run'].includes(item.name)) continue;
           const target='/'+item.name;
-          if (item.isSymbolicLink()) links.set(target, readlinkSync(target));
+          if (item.isSymbolicLink()) {
+            links.set(target, readlinkSync(target));
+            if (terminal) mounts.delete(target);
+          }
           else if (item.isFile() || item.isDirectory()) mounts.set(target,mode);
         }
         continue;
@@ -74,7 +88,7 @@ function buildSandboxArgs(job: SandboxJob, terminal?: TerminalMounts): string[] 
         path === dir || path.startsWith(dir + '/'))) throw new Error('unsupported reserved mount: ' + path);
       mounts.set(path, mode);
   }
-  const privateTmp = sandboxPrivateTmp(job.appId);
+  const privateTmp = terminal?.privateTmp ?? sandboxPrivateTmp(job.appId);
   const args = ['--unshare-all', '--unshare-user', '--cap-drop', 'ALL', '--die-with-parent',
     '--new-session', '--as-pid-1', '--json-status-fd', '4'];
   if (sandbox.network) args.push('--share-net');
@@ -84,23 +98,77 @@ function buildSandboxArgs(job: SandboxJob, terminal?: TerminalMounts): string[] 
   // The mount list is ordered so that a more specific grant takes effect last.
   for (const [path,target] of links) args.push('--symlink',target,path);
   const maskedDirs:string[]=[];
+  const applied = new Map<string,string>();
   for (const [path, mode] of [...mounts].sort(([a], [b]) => a.length - b.length)) {
-    if (mode!=='hide') args.push(mode, path, path);
-    else if (lstatSync(path).isDirectory()) { args.push('--tmpfs',path); maskedDirs.push(path); }
+    let source = path;
+    let directory: boolean;
+    if (terminal) {
+      // Minimal system directories may be distribution-provided symlinks.
+      // Resolve only those fixed defaults. Every caller-selected component
+      // must be opened without following links.
+      const fixedSystem = !requested.has(path) && ['/bin','/sbin','/lib','/usr','/etc'].includes(path);
+      if (terminal.sources.size >= 256) throw Error('Too many terminal filesystem mounts');
+      const fd = openMountSource(fixedSystem ? realpathSync(path) : path);
+      terminal.sources.set(path,fd);
+      const info = fstatSync(fd,{bigint:true});
+      directory = info.isDirectory();
+      if (!directory && !info.isFile()) throw Error('Expected a regular mount file or directory');
+      if (terminal.parentSources) {
+        let name = path;
+        let parent = enclosingMount(terminal.parentSources,name);
+        if (!parent && fixedSystem) {
+          name = realpathSync(path);
+          parent = enclosingMount(terminal.parentSources,name);
+        }
+        if (!parent) throw Error('Terminal mount source changed');
+        const inherited = openMountSource(name.slice(parent.name.length) || '/',parent.fd);
+        try {
+          const original = fstatSync(inherited,{bigint:true});
+          if (info.dev !== original.dev || info.ino !== original.ino) throw Error('Terminal mount source changed');
+        } finally { closeSync(inherited); }
+      }
+      // A mutable directory cannot enforce a restrictive child overlay:
+      // another holder can rename the destination while setting up the namespace.
+      const enclosing = [...applied.keys()].filter(anchor => path.startsWith(anchor + '/')).at(-1);
+      if (enclosing && applied.get(enclosing) !== 'hide') {
+        if (applied.get(enclosing) === '--bind') throw Error('Unsafe nested mount below writable directory');
+        let component = enclosing;
+        for (const name of path.slice(enclosing.length + 1).split('/')) {
+          if (terminal.parentAllowsWrite?.(component)) throw Error('Nested mount destination is writable by the caller');
+          component += '/' + name;
+        }
+      }
+      if (enclosing || mode === 'hide')
+        terminal.verifyMounts.push({path,mode:mode === 'hide' ? (directory ? 'mask-dir' : 'mask-file') : mode === '--bind' ? 'rw' : 'ro',
+          ...(mode !== 'hide' && {inode:String(info.ino),dev:String(info.dev)})});
+      applied.set(path,mode);
+      if (mode !== 'hide') source = String(terminal.passFd(fd));
+    } else directory = mode === 'hide' && lstatSync(path).isDirectory();
+    if (mode!=='hide') args.push(terminal ? mode + '-fd' : mode, source, path);
+    else if (directory) { args.push('--tmpfs',path); maskedDirs.push(path); }
     else args.push('--ro-bind','/dev/null',path);
   }
   for (const dir of maskedDirs) args.push('--remount-ro',dir);
   for (const mount of job.runtimeMounts ?? []) {
-    if (!['/run/pappai/http','/run/pappai/files'].includes(mount.target) ||
+    if (!['/run/pappai/http','/run/pappai/files','/run/pappai/terminal.sock'].includes(mount.target) ||
       !isAbsolute(mount.source) || realpathSync(mount.source)!==mount.source) throw Error('Invalid runtime mount');
     args.push(mount.readonly?'--ro-bind':'--bind',mount.source,mount.target);
   }
-  args.push('--dev', '/dev', '--proc', '/proc', '--bind', privateTmp, '/tmp');
+  args.push('--dev', '/dev', '--proc', '/proc');
   if (terminal) {
-    if (terminal.socket) args.push('--ro-bind', terminal.socket, '/run/pappai/terminal.sock');
+    const bind = (source:string,target:string,readonly=false,socket=false) => {
+      const fd = openMountSource(source);
+      terminal.setupFds.push(fd);
+      const info = fstatSync(fd);
+      if (!(socket ? info.isSocket() : info.isDirectory())) throw Error('Unexpected terminal mount type');
+      args.push(readonly ? '--ro-bind-fd' : '--bind-fd',String(terminal.passFd(fd)),target);
+    };
+    bind(privateTmp,'/tmp');
+    if (terminal.socket) bind(terminal.socket,'/run/pappai/terminal.sock',true,true);
     for (let i = 0; i < terminal.files; i++) args.push('--ro-bind-fd', String(5 + i), '/run/pappai/cli/' + i);
-    if (terminal.scratch) args.push('--bind', terminal.scratch.source, terminal.scratch.path);
-  }
+    if (terminal.scratch) bind(terminal.scratch.source, terminal.scratch.path);
+    if (terminal.sharedCwd) args.push('--bind-fd', String(5 + terminal.files), terminal.sharedCwd);
+  } else args.push('--bind', privateTmp, '/tmp');
   args.push('--remount-ro', '/',
     '--chdir', settings.cwd, '--clearenv');
   for (const [key, value] of Object.entries({...baseEnvironment, ...settings.env})) {

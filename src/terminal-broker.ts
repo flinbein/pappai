@@ -9,7 +9,8 @@ export function controlFrame(value: object) {
   return Buffer.concat([header, data]);
 }
 
-export type BrokerRequest = {method: string; params: any; cols?: number; rows?: number; asNode?: string};
+export type BrokerRequest = {method: string; params: any; cols?: number; rows?: number; asNode?: string;
+  restrictPermissions?: unknown; permissions?: unknown};
 type Handler = (request: BrokerRequest, socket: Socket, signal: AbortSignal) => Promise<void>;
 export function terminalBroker(authorized: () => boolean, handle: Handler, adminPath?: string) {
   const directory = adminPath ? undefined : mkdtempSync('/run/pappai-terminal-');
@@ -39,14 +40,14 @@ export function terminalBroker(authorized: () => boolean, handle: Handler, admin
         if (!authorized()) throw Error('Terminal session expired');
         if ('asNode' in request && (!adminPath || typeof request.asNode !== 'string' || !request.asNode))
           throw Error('Changing identity requires the local administrator socket');
-        if (!['me','call','help','discover','publish','cli'].includes(request.method))
+        if (!['me','call','help','discover','publish','checkPermissions','cli','run'].includes(request.method))
           throw Error('Unknown terminal RPC method');
       } catch (error) {
         socket.end(controlFrame({error: (error as Error).message}));
         return;
       }
       // Non-streaming requests have no second message. Keep reading to notice a disconnect.
-      if (request.method !== 'cli') socket.on('data', () => socket.destroy());
+      if (request.method !== 'cli' && request.method !== 'run') socket.on('data', () => socket.destroy());
       handle(request, socket, life.signal).catch(error => {
         if (!socket.destroyed) socket.end(controlFrame({error: error.message}));
       });

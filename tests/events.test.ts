@@ -83,6 +83,19 @@ test('USER subscriptions belong to a single WebSocket and expire with the authen
   assert.equal(canonicalClose[0],4401);
 });
 
+test('restricted TEAM publication delivers ordinary events and filters reported recipients',async t=>{
+  const {store,actor,controller,connect}=await fixture(t);
+  const team=store.create('~','team',{name:'publisher',permissions:null}).id;
+  const {rpc,received}=await connect();
+  await rpc('subscriptions.add',{subscriptions:[{id:'team',node:team,events:'ordinary'}]});
+  const report=await controller.publish(team,{event:'ordinary',to:actor,delivery:'status',permissions:[]});
+  await rpc('subscriptions.get');
+  assert.deepEqual(report.deliveries,[]);
+  assert.equal(received.length,1);
+  assert.equal(received[0].params.from,team);
+  assert.throws(()=>controller.publish(team,{event:'$.node.created'}),/publication/);
+});
+
 test('subscriptions apply in frame order and overlapping matches produce one event before the call response',async t=>{
   const {connect,controller,touches}=await fixture(t);
   const {rpc,messages,received,ws}=await connect();

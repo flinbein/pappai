@@ -5,19 +5,32 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, posix } from 'node:path';
 import { pipeline } from 'node:stream/promises';
-import { openReadFile, openRegularFile, type FileMode } from './file-view.ts';
+import { openMountedFile, openReadFile, openRegularFile, type FileMode } from './file-view.ts';
 import { sandboxPrivateTmp } from './sandbox.ts';
-import type { Store } from './store.ts';
+import type { PermissionContext, Store } from './store.ts';
 
 type FileGrants = Record<FileMode, string[]>;
-export type FileView = ReturnType<Store['fileSnapshot']> & {unmappedTmp?:boolean; revoked?:boolean; scratch?:{path:string;source:string}};
+export type FileView = ReturnType<Store['fileSnapshot']> & {unmappedTmp?:boolean; revoked?:boolean;
+  scratch?:{path:string;source:string}; privateTmp?: string; sharedCwd?: {path:string; fd:number}; mountSources?:Map<string,number>};
 type Call = {
-  actor: string; target: string; executor?: string; callerView?: FileView; grants: FileGrants;
+  actor: string; target: string; executor?: string; callerView?: FileView; context?:PermissionContext; grants: FileGrants;
   abort: AbortController; handles: Map<string, Handle>; copies: number;
 };
 type Handle = {fd?: number; mode: FileMode};
 type Endpoint = {path: string; dir: string; server: Server; app?: string; view?: FileView};
 const maxOperations = 32;
+
+export function callerFileView(store:Pick<Store,'fileSnapshot'>,actor:string,mounted?:FileView,context?:PermissionContext) {
+  const effective=store.fileSnapshot(actor,context,mounted?.sandbox);
+  const caller=mounted ?? (context ? store.fileSnapshot(actor) : effective);
+  return {sandbox:caller.sandbox,allows:(path:string,write=false)=>{
+    if (mounted?.revoked || ['/proc','/sys','/dev','/run'].some(dir=>path===dir || path.startsWith(dir+'/'))) return false;
+    // A per-call limiter cannot remap an existing launch's host /tmp.
+    if ((path==='/tmp' || path.startsWith('/tmp/')) &&
+        (mounted?.unmappedTmp || caller.sandbox===null && effective.sandbox!==null)) return false;
+    return effective.allows(path,write) && (!mounted || mounted.allows(path,write));
+  }};
+}
 
 function filePath(value: unknown, scope = false): string {
   if (typeof value !== 'string' || !value.startsWith('/') || value.includes('\0') ||
@@ -61,13 +74,13 @@ export class FileDelegations {
 
   constructor(store: Pick<Store, 'fileSnapshot'>) { this.store = store; }
 
-  callOpened(id: string, actor: string, target: string, params: any, callerExecutor?: string, terminalView?:FileView) {
+  callOpened(id: string, actor: string, target: string, params: any, callerExecutor?: string, terminalView?:FileView, context?:PermissionContext) {
     const grants = parseGrants(params);
     if (Object.values(grants).some(paths => paths.length)) {
       if (process.platform !== 'linux') throw Error('Delegated files require Linux');
       const endpoint = callerExecutor ? this.endpoints.get(callerExecutor) : undefined;
       if (callerExecutor && (!endpoint?.view || endpoint.app !== actor)) throw Error('Unknown caller file view');
-      this.calls.set(id, {actor, target, grants, callerView:endpoint?.view ?? terminalView,
+      this.calls.set(id, {actor, target, grants, context, callerView:endpoint?.view ?? terminalView,
         abort: new AbortController(), copies: 0, handles: new Map()});
     }
   }
@@ -120,6 +133,7 @@ export class FileDelegations {
     const view=this.endpoints.get(executor)?.view;
     if (view) view.revoked=true;
   }
+  executorView(executor:string) { return this.endpoints.get(executor)?.view; }
 
   close() {
     for (const executor of this.endpoints.keys()) this.executorExit(executor);
@@ -136,35 +150,32 @@ export class FileDelegations {
     endpoint.server.closeAllConnections();
   }
 
-  private open(actor: string, path: string, mode: FileMode, mounted?: FileView) {
-    if (mounted?.revoked) throw Error('File access denied');
-    const current = this.store.fileSnapshot(actor);
-    const allows = (name: string, write: boolean) => current.allows(name, write) &&
-      (!mounted || mounted.allows(name, write));
-    if (['/proc', '/sys', '/dev', '/run'].some(dir => path === dir || path.startsWith(dir + '/')) ||
-        !allows(path, mode !== 'read')) throw Error('File access denied');
-    // Mounts outlive a permissions change. A new sandbox's private /tmp
-    // cannot authorize opening the host /tmp of an older trusted process.
-    if (path.startsWith('/tmp/') && (mounted?.unmappedTmp || mounted?.sandbox === null && current.sandbox !== null))
-      throw Error('File access denied');
-    const scratch=mounted?.scratch;
-    let actual = path.startsWith('/tmp/') && (mounted ?? current).sandbox !== null
-      ? join(sandboxPrivateTmp(actor), path.slice('/tmp/'.length)) : path;
-    if (scratch && path.startsWith(scratch.path+'/')) actual=join(scratch.source,path.slice(scratch.path.length+1));
-    // Host paths, especially private tmp backing directories, stay off the wire.
-    const canCreate = mode !== 'read' && allows(posix.dirname(path), true);
+  private open(actor:string, path:string, mode:FileMode, mounted?:FileView, context?:PermissionContext) {
+    const caller=callerFileView(this.store,actor,mounted,context);
+    if (!caller.allows(path,mode!=='read')) throw Error('File access denied');
+    const canCreate = mode !== 'read' && caller.allows(posix.dirname(path), true);
     if (mode === 'create' && !canCreate) throw Error('File creation denied');
-    try { return openRegularFile(actual, mode, canCreate); }
+    const scratch=mounted?.scratch;
+    let actual = path.startsWith('/tmp/') && caller.sandbox !== null
+      ? join(mounted?.privateTmp ?? sandboxPrivateTmp(actor), path.slice('/tmp/'.length)) : path;
+    if (scratch && path.startsWith(scratch.path+'/')) actual=join(scratch.source,path.slice(scratch.path.length+1));
+    const cwd = mounted?.sharedCwd;
+    const inCwd = cwd && path.startsWith(cwd.path + '/');
+    // Host paths, especially private tmp backing directories, stay off the wire.
+    try {
+      if (mounted?.mountSources && !path.startsWith('/tmp/')) return openMountedFile(path,mode,canCreate,mounted.mountSources);
+      return inCwd ? openRegularFile(path.slice(cwd.path.length), mode, canCreate, cwd.fd) : openRegularFile(actual,mode,canCreate);
+    }
     catch (err) { throw Error((err as NodeJS.ErrnoException).code ?? 'Expected an ordinary file'); }
   }
 
-  readProfileFile(actor:string, path:string, workerId?:string, terminalView?:FileView) {
+  readProfileFile(actor:string, path:string, workerId?:string, terminalView?:FileView, context?:PermissionContext) {
     const endpoint=workerId ? this.endpoints.get(workerId) : undefined;
     if (workerId && (!endpoint?.view || endpoint.app!==actor)) throw Error('Unknown caller file view');
     let fd:number;
-    if (process.platform==='linux') fd=this.open(actor,filePath(path),'read',endpoint?.view ?? terminalView);
+    if (process.platform==='linux') fd=this.open(actor,filePath(path),'read',endpoint?.view ?? terminalView,context);
     else {
-      if (workerId || terminalView || this.store.fileSnapshot(actor).sandbox!==null || typeof path!=='string' || !isAbsolute(path))
+      if (workerId || terminalView || this.store.fileSnapshot(actor,context).sandbox!==null || typeof path!=='string' || !isAbsolute(path))
         throw Error('File access denied');
       fd=openReadFile(path,()=>true);
     }
@@ -192,7 +203,7 @@ export class FileDelegations {
       const path = filePath(params.path);
       const mode = params.mode;
       if (mode !== 'read' && mode !== 'write' && mode !== 'create') throw Error('Invalid file mode');
-      const fd = this.open(call.actor, path, effectiveMode(call, path, mode),call.callerView);
+      const fd = this.open(call.actor, path, effectiveMode(call, path, mode),call.callerView,call.context);
       const handle = randomUUID();
       call.handles.set(handle, {fd, mode});
       this.handles.set(handle, call);
@@ -210,9 +221,9 @@ export class FileDelegations {
     call.copies++;
     try {
       const selfView = this.endpoints.get(executor)?.view;
-      src = from.side === 'caller' ? this.open(call.actor,from.path,srcMode,call.callerView) :
+      src = from.side === 'caller' ? this.open(call.actor,from.path,srcMode,call.callerView,call.context) :
         this.open(app,from.path,srcMode,selfView);
-      dst = to.side === 'caller' ? this.open(call.actor,to.path,dstMode,call.callerView) :
+      dst = to.side === 'caller' ? this.open(call.actor,to.path,dstMode,call.callerView,call.context) :
         this.open(app,to.path,dstMode,selfView);
       const source = fstatSync(src, {bigint:true});
       const destination = fstatSync(dst, {bigint:true});

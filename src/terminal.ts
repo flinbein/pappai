@@ -2,32 +2,35 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { closeSync, mkdirSync, mkdtempSync, readFileSync, rmSync, rmdirSync } from 'node:fs';
 import type { IncomingMessage, Server } from 'node:http';
 import type { Socket } from 'node:net';
-import { basename, join } from 'node:path';
+import { basename, join, posix } from 'node:path';
 import type { Readable } from 'node:stream';
 import { WebSocket, WebSocketServer } from 'ws';
-import type { Store } from './store.ts';
+import type { PermissionContext, Store } from './store.ts';
 import { sandboxPrivateTmp, terminalSandboxArgs } from './sandbox.ts';
 import { isWebRpcSocket } from './events.ts';
 import { adminBroker, controlFrame, terminalBroker, type BrokerRequest } from './terminal-broker.ts';
-import { openRegularFile } from './file-view.ts';
+import { openDirectory, openRegularFile } from './file-view.ts';
+import type { FileView } from './file-delegations.ts';
 import { fileLevel } from './permits.ts';
 
 const bridge = readFileSync(new URL('./terminal-pty.py', import.meta.url), 'utf8');
 const limit = 1024 * 1024;
 type SessionUser = (req: IncomingMessage, touch?: boolean, expectedBrowserSession?: string) => string | null;
 const validDimension = (n: unknown) => typeof n === 'number' && Number.isInteger(n) && n >= 1 && n <= 1000;
-export type TerminalView = ReturnType<Store['fileSnapshot']> & {scratch?: {source: string; path: string}; revoked?: boolean};
+export type TerminalView = FileView;
 type CliAction = {files: string[]; argv: string[]; env?: Record<string,string>; node?:string; calls?:string[]};
 export type TerminalHooks = {
   prepareCli(actor: string, node: string, method: string, input: any, signal: AbortSignal): Promise<CliAction>;
-  rpc(actor: string, method: string, params: any, view: TerminalView, signal: AbortSignal): Promise<any>;
+  rpc(actor: string, method: string, params: any, view: TerminalView, signal: AbortSignal, ctx?:PermissionContext): Promise<any>;
 };
 type Command = {command?: string; argv?: string[]; env?: Record<string,string>};
+type Run = {argv:string[]; cwd:string; withRpc:boolean; tty:boolean; env?:Record<string,string>};
 type TerminalProcess = {child: ChildProcess; sandboxed: boolean};
 type TerminalContext = {
   store: Store; actor: string; hooks?: TerminalHooks; authorized: () => boolean;
   signal: AbortSignal; forceSandbox: boolean; children: Set<Promise<void>>;
   depth: number; budget: {preparing: number};
+  permissions?: PermissionContext; mounted?: TerminalView; scope?: Pick<CliAction,'node'|'calls'>;
 };
 
 function checkCommand(command: Command) {
@@ -50,22 +53,43 @@ async function prepare(context: TerminalContext, cli: any) {
   context.budget.preparing++;
   try {
     const input = cli.input === undefined ? {} : cli.input;
-    return await context.hooks.prepareCli(context.actor, cli.node, cli.method, input, context.signal);
+    function check() {
+      if (context.permissions && !context.store.contextAllows(context.actor,context.permissions,cli.node,'cli',cli.method,input))
+        throw Error('Permission denied');
+    }
+    check();
+    const descriptor = await context.hooks.prepareCli(context.actor, cli.node, cli.method, input, context.signal);
+    check();
+    return descriptor;
   } finally { context.budget.preparing--; }
 }
 
-async function relayNested(context: TerminalContext, request: BrokerRequest, socket: Socket, originalGrants: string) {
+function runOptions(params: any): Run {
+  if (!params || typeof params !== 'object' || typeof params.tty !== 'boolean' || typeof params.withRpc !== 'boolean' ||
+      typeof params.cwd !== 'string' || !posix.isAbsolute(params.cwd) || params.cwd.includes('\0') ||
+      posix.normalize(params.cwd) !== params.cwd || (params.cwd !== '/' && params.cwd.endsWith('/')) ||
+      Buffer.byteLength(params.cwd) > 4096 ||
+      Object.keys(params).some(key => !['argv','env','tty','withRpc','cwd'].includes(key)))
+    throw Error('Invalid run arguments');
+  checkCommand({argv:params.argv, env:params.env});
+  if (Object.keys(params.env ?? {}).some(key => !['TERM','LANG','LC_ALL','LC_CTYPE','COLORTERM'].includes(key)))
+    throw Error('Invalid run environment');
+  return params;
+}
+
+async function relayNested(context: TerminalContext, request: BrokerRequest, socket: Socket) {
   if (!validDimension(request.cols) || !validDimension(request.rows)) throw Error('Invalid terminal dimensions');
+  if (context.depth > 4 || context.budget.preparing + context.children.size >= 16) throw Error('Too many terminal processes');
   // The client waits for the child's startup frame before forwarding terminal input.
   const earlyInput = () => socket.destroy();
   socket.on('data', earlyInput);
-  const descriptor = await prepare(context, request.params);
+  const run = request.method === 'run' ? runOptions(request.params) : undefined;
+  const descriptor = run ? undefined : await prepare(context, request.params);
   socket.removeListener('data', earlyInput);
   socket.pause();
   context.signal.throwIfAborted();
-  if (JSON.stringify(context.store.sandbox(context.actor)) !== originalGrants)
-    throw Error('Terminal permissions changed. Reopen the terminal.');
-  const {child} = launch(context, {argv: descriptor.argv, env: descriptor.env}, request.cols!, request.rows!, descriptor);
+  const command = run ?? descriptor!;
+  const {child} = launch(context, {argv: command.argv, env: command.env}, request.cols!, request.rows!, descriptor,run);
   socket.pipe(child.stdin!);
   child.stdout!.pipe(socket, {end: false});
   let diagnostic = '';
@@ -78,15 +102,47 @@ async function relayNested(context: TerminalContext, request: BrokerRequest, soc
   });
 }
 
-function launch(context: TerminalContext, command: Command, cols: number, rows: number, action?: CliAction): TerminalProcess {
+async function dispatch(context: TerminalContext, request: BrokerRequest, socket: Socket, mounted: TerminalView) {
+  const {actor,store,scope,signal} = context;
+  if (scope && !['me','run'].includes(request.method) && !(request.method === 'call' && request.params?.node === scope.node &&
+      scope.calls?.includes(request.params?.method))) throw Error('Operation outside the CLI launch permissions');
+  const permissions = store.restrict(actor,context.permissions,request.restrictPermissions,request.permissions);
+  if (request.method === 'cli' || request.method === 'run') {
+    await relayNested({...context, permissions},request,socket);
+    return;
+  }
+  const view = permissions ? {...mounted, get revoked() { return mounted.revoked; },
+    allows:(path:string,write = false) => mounted.allows(path,write) && store.fileSnapshot(actor,permissions).allows(path,write)} : mounted;
+  const result = await context.hooks!.rpc(actor, request.method, request.params ?? {}, view, signal, permissions);
+  if (!signal.aborted && context.authorized()) socket.end(controlFrame({result: result ?? null}));
+  else socket.destroy();
+}
+
+// Pin only the working subtree. Its parent may rename entries while a new
+// namespace is being built. Neither mount nor RPC follows user-owned links.
+function pinWorkingDirectory(actor:string, path:string, parent:TerminalView): number | undefined {
+  const within = (root:string) => path === root || path.startsWith(root + '/');
+  try {
+    if (parent.sharedCwd && within(parent.sharedCwd.path))
+      return openDirectory(path.slice(parent.sharedCwd.path.length) || '/',parent.sharedCwd.fd);
+    if (parent.scratch && within(parent.scratch.path))
+      return openDirectory(join(parent.scratch.source,path.slice(parent.scratch.path.length)));
+    return openDirectory(join(parent.privateTmp ?? sandboxPrivateTmp(actor),path.slice('/tmp/'.length)));
+  } catch (error) {
+    if (['ENOENT','ENOTDIR','EACCES','ELOOP'].includes((error as NodeJS.ErrnoException).code ?? '')) return;
+    throw error;
+  }
+}
+
+function launch(context: TerminalContext, command: Command, cols: number, rows: number, action?: CliAction, run?:Run): TerminalProcess {
   const {store, actor, hooks, signal, authorized, forceSandbox} = context;
   if (process.platform !== 'linux') throw Error('The web terminal requires a pappai Linux container');
   signal.throwIfAborted();
   if (!authorized()) throw Error('Terminal session expired');
-  const view: TerminalView = store.fileSnapshot(actor);
-  const originalGrants = JSON.stringify(view.sandbox);
-  if (!view.sandbox && (forceSandbox || action)) {
-    view.sandbox = {read: [], write: [], network: !!action && !forceSandbox};
+  if (context.children.size >= 16) throw Error('Too many terminal processes');
+  const view: TerminalView = store.fileSnapshot(actor,context.permissions,context.mounted?.sandbox ?? undefined);
+  if (!view.sandbox && (forceSandbox || action || run)) {
+    view.sandbox = {read: [], write: [], network: !!(action || run) && !forceSandbox};
     view.allows = (path, write = false) => path === '/tmp' || path.startsWith('/tmp/') ||
       fileLevel([], path) >= (write ? 2 : 1);
   }
@@ -96,10 +152,12 @@ function launch(context: TerminalContext, command: Command, cols: number, rows: 
   const settings = {cwd, command: '/usr/bin/python3', env};
   const args = ['-I', '-c', bridge];
   const fds: number[] = [];
+  const setupFds:number[] = [];
   const life = new AbortController();
   const active = AbortSignal.any([signal, life.signal]);
   let broker: ReturnType<typeof terminalBroker> | undefined;
   let scratchMountpoint: string | undefined;
+  let ownedTmp: string | undefined;
   function cleanup() {
     view.revoked = true;
     life.abort();
@@ -109,46 +167,57 @@ function launch(context: TerminalContext, command: Command, cols: number, rows: 
       catch (error) { console.error('Could not remove terminal scratch directory:', (error as NodeJS.ErrnoException).code); }
     }
     if (scratchMountpoint) { try { rmdirSync(scratchMountpoint); } catch {} }
+    if (view.sharedCwd) closeSync(view.sharedCwd.fd);
+    if (view.mountSources) for (const fd of view.mountSources.values()) closeSync(fd);
+    if (ownedTmp) {
+      try { rmSync(ownedTmp,{recursive:true,force:true,maxRetries:3}); }
+      catch (error) { console.error('Could not remove run temporary directory:', (error as NodeJS.ErrnoException).code); }
+    }
   }
   try {
-    if (sandbox && hooks && (!action || action.calls?.length)) broker = terminalBroker(() => !active.aborted && authorized(), async (request, socket, connectionSignal) => {
-      const requestSignal = AbortSignal.any([active, connectionSignal]);
-      if (action && request.method !== 'me' && !(request.method === 'call' && request.params?.node === action.node &&
-          action.calls?.includes(request.params?.method))) throw Error('Operation outside the CLI launch permissions');
-      if (request.method !== 'cli') {
-        const result = await hooks.rpc(actor, request.method, request.params ?? {}, view, requestSignal);
-        if (!requestSignal.aborted && authorized()) socket.end(controlFrame({result: result ?? null}));
-        else socket.destroy();
-        return;
+    if (sandbox && hooks && (run ? run.withRpc : !action || action.calls?.length))
+      broker = terminalBroker(() => !active.aborted && authorized(), (request, socket, connectionSignal) =>
+        dispatch({...context, signal: AbortSignal.any([active,connectionSignal]), depth: context.depth + 1,
+          scope: action ?? context.scope, mounted:view},request,socket,view));
+    if (run) {
+      view.privateTmp = ownedTmp = mkdtempSync('/run/pappai-run-');
+      if (context.mounted?.sandbox && run.cwd.startsWith('/tmp/')) {
+        const fd = pinWorkingDirectory(actor,run.cwd,context.mounted);
+        if (fd !== undefined) view.sharedCwd = {path:run.cwd,fd};
       }
-      await relayNested({...context, signal: requestSignal, depth: context.depth + 1}, request, socket, originalGrants);
-    });
+    } else if (context.mounted?.privateTmp) view.privateTmp = context.mounted.privateTmp;
     if (action) {
-      if (context.children.size >= 16) throw Error('Too many terminal CLI actions');
       if (!sandbox || !Array.isArray(action.files) || action.files.length > 64) throw Error('Invalid terminal CLI files');
       for (const file of action.files) fds.push(openRegularFile(file, 'read'));
       const source = mkdtempSync('/run/pappai-cli-');
       view.scratch = {source, path: '/tmp/' + basename(source)};
-      const mountpoint = join(sandboxPrivateTmp(actor), basename(source));
+      const mountpoint = join(view.privateTmp ?? sandboxPrivateTmp(actor), basename(source));
       // Never mount over a pre-existing name in the USER-writable directory.
       mkdirSync(mountpoint, {mode: 0o700});
       scratchMountpoint = mountpoint;
     }
     checkCommand(command);
+    const childFds = [...fds,...(view.sharedCwd ? [view.sharedCwd.fd] : [])];
+    const verifyMounts: {path:string; mode:string; inode?:string; dev?:string}[] = [];
+    const options = sandbox && terminalSandboxArgs({appId: actor, sandbox, settings}, {
+      socket: broker?.path, files: fds.length, scratch: view.scratch,
+      privateTmp:view.privateTmp,sharedCwd:view.sharedCwd?.path,
+      sources:view.mountSources = new Map(),parentSources:context.mounted?.mountSources,setupFds,verifyMounts,
+      parentAllowsWrite:context.mounted && (path => context.mounted!.allows(path,true)),
+      passFd:fd => 4 + childFds.push(fd)});
     const childEnv = {...command.env,
       ...(view.scratch && {PAPPAI_CLI_TMP: view.scratch.path})};
-    const data = Buffer.from(JSON.stringify({...command, env: childEnv}));
+    const data = Buffer.from(JSON.stringify({...command, env: childEnv, ...(verifyMounts.length && {verifyMounts}),
+      ...(run && {tty:run.tty,cwd:view.allows(run.cwd) ? run.cwd : '/tmp'})}));
     if (data.length > 65536) throw Error('Terminal command is too long');
     const header = Buffer.alloc(8);
     header.writeUInt32BE(data.length);
     header.writeUInt16BE(rows, 4);
     header.writeUInt16BE(cols, 6);
     let child: ChildProcess;
-    if (sandbox) {
-      const options = terminalSandboxArgs({appId: actor, sandbox, settings}, {
-        socket: broker?.path, files: fds.length, scratch: view.scratch});
+    if (options) {
       child = spawn('/usr/bin/bwrap', [...options, '--', settings.command, ...args], {
-        env: {PATH: env.PATH}, stdio: ['pipe', 'pipe', 'pipe', 'ignore', 'pipe', ...fds],
+        env: {PATH: env.PATH}, stdio: ['pipe', 'pipe', 'pipe', 'ignore', 'pipe', ...childFds],
       });
       (child.stdio[4] as Readable).resume();
     } else child = spawn(settings.command, args, {cwd, env, stdio: 'pipe'});
@@ -171,7 +240,7 @@ function launch(context: TerminalContext, command: Command, cols: number, rows: 
     void done.then(() => context.children.delete(done));
     return {sandboxed: !!sandbox, child};
   } catch (error) { cleanup(); throw error; }
-  finally { for (const fd of fds) closeSync(fd); }
+  finally { for (const fd of [...fds,...setupFds]) closeSync(fd); }
 }
 
 function rejectStart(ws: WebSocket, manual: boolean, error: string, code = 1011) {
@@ -260,7 +329,9 @@ export function attachTerminals(server: Server, address: URL, store: Store, user
   let closing = false;
   let admin: Awaited<ReturnType<typeof adminBroker>> | undefined;
   const localChildren = new Set<Promise<void>>();
+  const localBudget = {preparing:0};
   const localLife = new AbortController();
+  const executorEndpoints = new Map<string, () => void>();
 
   server.on('upgrade', (req, socket, head) => {
     if (isWebRpcSocket(req.url)) return;
@@ -332,30 +403,45 @@ export function attachTerminals(server: Server, address: URL, store: Store, user
     });
   });
   return {
+    executorSocket(id:string, actor:string, mounted:TerminalView, current:() => boolean) {
+      if (!hooks || closing || executorEndpoints.has(id)) throw Error('Cannot open executor RPC socket');
+      const life = new AbortController();
+      const children = new Set<Promise<void>>();
+      const budget = {preparing:0};
+      const authorized = () => !closing && !life.signal.aborted && !mounted.revoked && current();
+      const broker = terminalBroker(authorized,(request,socket,connectionSignal) =>
+        dispatch({store,actor,hooks,mounted,authorized,forceSandbox:false,children,budget,depth:1,
+          signal:AbortSignal.any([life.signal,connectionSignal])},request,socket,mounted));
+      executorEndpoints.set(id,() => {
+        executorEndpoints.delete(id);
+        life.abort();
+        broker.close();
+        for (const child of children) {
+          localChildren.add(child);
+          void child.then(() => localChildren.delete(child));
+        }
+      });
+      return broker.path;
+    },
+    closeExecutor(id:string) { executorEndpoints.get(id)?.(); },
     async enableAdmin() {
       if (!hooks) throw Error('Administrator RPC requires terminal hooks');
       admin = await adminBroker(async (request,socket,connectionSignal) => {
         const actor = request.asNode ?? '~';
         const valid = () => {
           const node = store.get(actor);
-          return !closing && node?.status === 'working' && (actor === '~' || node.type === 'user' || node.type === 'app');
+          return !closing && node?.status === 'working' &&
+            (actor === '~' || node.type === 'user' || node.type === 'app' || node.type === 'team');
         };
-        if (!valid()) throw Error('Expected an active USER or APP');
+        if (!valid()) throw Error('Expected an active workspace, TEAM, USER or APP');
         const {node,method} = request.params ?? {};
         console.info('Local administrator RPC', JSON.stringify({administrator:'~',actor,operation:request.method,
           node:typeof node==='string' ? node.slice(0,256) : undefined,
           feature:typeof method==='string' ? method.slice(0,256) : undefined}));
         const signal = AbortSignal.any([localLife.signal,connectionSignal]);
         const view = store.fileSnapshot(actor);
-        if (request.method === 'cli') {
-          const context = {store,actor,hooks,authorized:valid,signal,forceSandbox:false,children:localChildren,
-            depth:1,budget:{preparing:0}};
-          await relayNested(context,request,socket,JSON.stringify(view.sandbox));
-        } else {
-          const result = await hooks.rpc(actor,request.method,request.params ?? {},view,signal);
-          if (valid() && !signal.aborted) socket.end(controlFrame({result:result ?? null}));
-          else socket.destroy();
-        }
+        await dispatch({store,actor,hooks,authorized:valid,signal,forceSandbox:false,children:localChildren,
+          depth:1,budget:localBudget},request,socket,view);
       });
     },
     checkSessions() {
@@ -365,6 +451,7 @@ export function attachTerminals(server: Server, address: URL, store: Store, user
       closing = true;
       localLife.abort();
       admin?.close();
+      for (const close of executorEndpoints.values()) close();
       const pending = Array.from(terminals.values(), terminal => terminal.done);
       for (const ws of wss.clients) ws.terminate();
       wss.close();

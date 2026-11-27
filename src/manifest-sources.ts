@@ -5,9 +5,11 @@ import { isDeepStrictEqual } from 'node:util';
 import { openReadFile } from './file-view.ts';
 import { prepare } from './manifest.ts';
 import { sandboxPrivateTmp } from './sandbox.ts';
-import type { NodeRecord, Store } from './store.ts';
+import type { NodeRecord, PermissionContext, Store } from './store.ts';
+import { callerFileView, type FileView } from './file-delegations.ts';
 
 type Source = {manifest: any} | {file: string; override?: any};
+type CallerFileAccess = {allows:(name:string,actual:string)=>boolean; mounts?:ReadonlyMap<string,number>};
 type Hooks = {
   hasRunner(type: string): boolean;
   validateSettings?(type: string, settings: unknown): void;
@@ -68,8 +70,8 @@ export function mask<T extends Source>(source: T): T {
     if (object(value) && Object.hasOwn(value, 'secret')) value.secret = true;
   return result;
 }
-function readJSON(path: string, allows: (path: string)=>boolean) {
-  const fd = openReadFile(path, allows);
+function readJSON(path: string, allows: (path: string)=>boolean, mounts?:ReadonlyMap<string,number>) {
+  const fd = openReadFile(path, allows,mounts);
   try {
     const size = fstatSync(fd).size;
     if (size > 1024 * 1024) throw Error('Manifest exceeds 1 MiB');
@@ -125,22 +127,23 @@ export class ManifestSources {
     return row ? JSON.parse(String(row.source)) : {manifest:node.manifest};
   }
   private file(id: string, path: string) {
-    if (this.store.sandbox(id) === null) return {path,
+    if (this.store.sandbox(id) === null) return {path,logical:(name:string)=>name,
       allows:(name:string)=>this.store.allowsFile(id,name,false)};
     const temporary = path.startsWith('/tmp/') ? sandboxPrivateTmp(id) : undefined;
     const host = temporary ? join(temporary,path.slice(5)) : path;
-    return {path:host, allows:(name:string)=>{
-      if (temporary && name.startsWith(temporary + sep))
-        return this.store.allowsFile(id,'/tmp/' + name.slice(temporary.length + 1),false);
+    const logical=(name:string)=>temporary && name.startsWith(temporary + sep) ? '/tmp/' + name.slice(temporary.length + 1) : name;
+    return {path:host,logical,allows:(name:string)=>{
+      if (logical(name)!==name) return this.store.allowsFile(id,logical(name),false);
       if (name === '/tmp' || name.startsWith('/tmp/')) return false;
       return this.store.allowsFile(id,name,false);
     }};
   }
-  private candidate(id: string, source: Source, allowLinks: boolean) {
+  private candidate(id: string, source: Source, allowLinks: boolean,caller?:CallerFileAccess) {
     const candidate = load(source, path => {
       try {
         const file = this.file(id,path);
-        return readJSON(file.path, name=>(allowLinks || name === file.path) && file.allows(name));
+        return readJSON(file.path, name=>(allowLinks || name === file.path) && file.allows(name) &&
+          (!caller || caller.allows(file.logical(name),name)), path.startsWith('/tmp/') ? undefined : caller?.mounts);
       } catch (error) {
         const code = (error as NodeJS.ErrnoException).code;
         if (code === 'ENOENT' || code === 'ENOTDIR') throw Error('Manifest file not found');
@@ -175,12 +178,12 @@ export class ManifestSources {
     try { this.check(node); }
     catch (error) { this.hooks.failed(id,'Manifest: ' + (error as Error).message); }
   }
-  private check(node: NodeRecord) {
+  private check(node: NodeRecord,caller?:CallerFileAccess) {
     const row = this.store.db.prepare('SELECT source,allowLinks FROM manifest_sources WHERE appId=?').get(node.id);
     if (!row) return;
     const source: Source = JSON.parse(String(row.source));
     this.watch(node.id,'file' in source ? this.file(node.id,source.file).path : undefined);
-    this.reconcile(node,this.candidate(node.id,source,!!row.allowLinks),true);
+    this.reconcile(node,this.candidate(node.id,source,!!row.allowLinks,caller),true);
   }
   private watch(id: string, file?: string) {
     const old = this.watched.get(id);
@@ -234,12 +237,24 @@ export class ManifestSources {
     this.watched.clear();
     this.pending.clear();
   }
-  system(actor: string,node: NodeRecord,method: string,data: any) {
+  system(actor: string,node: NodeRecord,method: string,data: any,context?:PermissionContext,mounted?:FileView) {
+    const caller:CallerFileAccess|undefined=context || mounted ? {mounts:mounted?.mountSources,allows:(name,actual)=>{
+      const view=callerFileView(this.store,actor,mounted,context);
+      if (!view.allows(name)) return false;
+      // APP sources live in the APP filesystem. A caller's other mount at the
+      // same name (a pinned task directory or private tmp) cannot authorize it.
+      if (mounted?.sharedCwd && (name===mounted.sharedCwd.path || name.startsWith(mounted.sharedCwd.path+'/'))) return false;
+      if (mounted?.scratch && name.startsWith(mounted.scratch.path+'/')) return false;
+      if (!name.startsWith('/tmp/')) return actual===name;
+      const location=view.sandbox===null ? name :
+        join(mounted?.privateTmp ?? sandboxPrivateTmp(actor),name.slice(5));
+      return actual===location;
+    }} : undefined;
     if (['$.lifecycle.start','$.app.forceStart','$.app.restart'].includes(method) && node.type === 'app') {
-      if (!this.store.allows(actor,node.id,method,data)) throw Error('Permission denied');
-      try { this.check(node); }
+      if (!this.store.contextAllows(actor,context,node.id,'methods',method,data)) throw Error('Permission denied');
+      try { this.check(node,caller); }
       catch (error) {
-        this.hooks.failed(node.id,'Manifest: ' + (error as Error).message);
+        if (!caller) this.hooks.failed(node.id,'Manifest: ' + (error as Error).message);
         throw error;
       }
       return {handled:false};
@@ -247,7 +262,7 @@ export class ManifestSources {
     if (method !== '$.children.createApp' && (node.type !== 'app' ||
         !['$.app.manifest.get','$.app.manifest.getApplied','$.app.manifest.set'].includes(method)))
       return {handled:false};
-    if (!this.store.allows(actor,node.id,method,data)) throw Error('Permission denied');
+    if (!this.store.contextAllows(actor,context,node.id,'methods',method,data)) throw Error('Permission denied');
     if (method === '$.app.manifest.get') return {handled:true,result:mask(this.source(node))};
     if (method === '$.app.manifest.getApplied') {
       const result = mask({manifest:node.manifest}) as {manifest:any};
@@ -267,8 +282,8 @@ export class ManifestSources {
       }
       // A delegated installation can be restricted to a package by the source
       // filename in the method permit. A later symlink must not redirect it.
-      const allowLinks = this.store.isAdmin(actor);
-      candidate = this.candidate(node.id,source,allowLinks);
+      const allowLinks = this.store.contextAdmin(actor,context);
+      candidate = this.candidate(node.id,source,allowLinks,caller);
       changed = !isDeepStrictEqual(candidate,this.pending.get(node.id) ?? node.manifest);
       db.prepare('INSERT INTO manifest_sources(appId,source,allowLinks) VALUES(?,?,?) ON CONFLICT(appId) DO UPDATE SET source=excluded.source,allowLinks=excluded.allowLinks')
         .run(node.id,JSON.stringify(source),Number(allowLinks));

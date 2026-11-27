@@ -6,7 +6,7 @@ import {
   generateAuthenticationOptions, verifyAuthenticationResponse,
 } from "@simplewebauthn/server";
 import type { RegistrationResponseJSON, AuthenticationResponseJSON } from "@simplewebauthn/server";
-import { Store } from "./store.ts";
+import { Store, type PermissionContext } from "./store.ts";
 import { sendRecoveryMail } from './recovery-mail.ts';
 
 const minute = 60_000;
@@ -21,7 +21,8 @@ class HttpError extends Error {
 function unauthorized(): never { throw new HttpError(401, "Invalid passkey or one-time code"); }
 
 export function migrateAuth(db: DatabaseSync) {
-  transaction(db, () => db.exec(`
+  transaction(db, () => {
+    db.exec(`
     CREATE TABLE IF NOT EXISTS passkeys (
       id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
       public_key BLOB NOT NULL, counter INTEGER NOT NULL
@@ -39,13 +40,16 @@ export function migrateAuth(db: DatabaseSync) {
     CREATE TABLE IF NOT EXISTS email_tokens(user_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE, hash TEXT UNIQUE NOT NULL,expires INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS recovery_requests(user_id TEXT NOT NULL, at INTEGER NOT NULL);
     CREATE INDEX IF NOT EXISTS recovery_times ON recovery_requests(user_id,at);
-    CREATE TABLE IF NOT EXISTS recovery_principals(hash TEXT PRIMARY KEY, actor TEXT NOT NULL, expires INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS recovery_principals(hash TEXT PRIMARY KEY, actor TEXT NOT NULL, expires INTEGER NOT NULL, context TEXT);
     CREATE TRIGGER IF NOT EXISTS end_disabled_user_sessions AFTER UPDATE OF status ON nodes
     WHEN NEW.type='user' AND OLD.status='working' AND NEW.status!='working'
     BEGIN
       DELETE FROM web_sessions WHERE key_id IN (SELECT id FROM passkeys WHERE user_id=NEW.id);
     END;
-  `));
+    `);
+    if (!db.prepare('PRAGMA table_info(recovery_principals)').all().some(row=>row.name==='context'))
+      db.exec('ALTER TABLE recovery_principals ADD COLUMN context TEXT');
+  });
 }
 
 // The external admin command holds a single transaction across identity reset and OTP issue.
@@ -92,9 +96,10 @@ export function createAuth(db: DatabaseSync, publicOrigin: string, sendMail = se
   type Ceremony = { kind:"login" | "register"; challenge:string; expires:number; grant?:string };
   const pending = new Map<string,Ceremony>();
   const deliveries = new Set<Promise<void>>();
-  async function deliver(actor:string,targetId:string) {
+  async function deliver(actor:string,targetId:string,context?:PermissionContext) {
     const target = store.get(targetId);
-    if (!target?.email || !store.allowsRecovery(actor,targetId,'$.user.recovery.send')) throw Error('Permission denied');
+    if (!target?.email || !(context ? store.contextAllows(actor,context,targetId,'methods','$.user.recovery.send',{}) :
+      store.allowsRecovery(actor,targetId,'$.user.recovery.send'))) throw Error('Permission denied');
     const code=transaction(db,()=>{
       const now=Date.now();
       db.prepare('DELETE FROM recovery_requests WHERE at<=?').run(now-day);
@@ -104,7 +109,8 @@ export function createAuth(db: DatabaseSync, publicOrigin: string, sendMail = se
       db.prepare('INSERT INTO recovery_requests VALUES(?,?)').run(targetId,now);
       const value=token();
       db.prepare("INSERT OR REPLACE INTO email_tokens VALUES(?,?,?)").run(targetId,hash(value),now+10*minute);
-      db.prepare('INSERT INTO recovery_principals VALUES(?,?,?)').run(hash(value),actor,now+10*minute);
+      db.prepare('INSERT INTO recovery_principals(hash,actor,expires,context) VALUES(?,?,?,?)')
+        .run(hash(value),actor,now+10*minute,context ? JSON.stringify(context) : null);
       return value;
     });
     try { await sendMail(target.email,code,site.origin); }
@@ -114,8 +120,8 @@ export function createAuth(db: DatabaseSync, publicOrigin: string, sendMail = se
       throw Error('Recovery email could not be delivered');
     }
   }
-  function requestMail(actor:string,id:string) {
-    const task=deliver(actor,id);
+  function requestMail(actor:string,id:string,context?:PermissionContext) {
+    const task=deliver(actor,id,context);
     deliveries.add(task);
     task.then(()=>deliveries.delete(task),()=>deliveries.delete(task));
     return task;
@@ -209,12 +215,15 @@ export function createAuth(db: DatabaseSync, publicOrigin: string, sendMail = se
         const recovery = token();
         grant = hash(recovery);
         transaction(db,() => {
-          const consumed = db.prepare("DELETE FROM enrollment_tokens WHERE user_id=? AND hash=? AND expires>?").run(target.id,hash(body.code),Date.now());
-          if (!consumed.changes && !db.prepare("DELETE FROM email_tokens WHERE user_id=? AND hash=? AND expires>?").run(target.id,hash(body.code),Date.now()).changes) unauthorized();
-          const principal=db.prepare('SELECT actor FROM recovery_principals WHERE hash=?').get(hash(body.code));
-          if (principal) db.prepare('INSERT INTO recovery_principals VALUES(?,?,?)').run(grant,principal.actor,Date.now()+30*minute);
-          db.prepare("DELETE FROM enrollment_grants WHERE expires<=?").run(Date.now());
-          db.prepare("INSERT INTO enrollment_grants VALUES(?,?,?)").run(grant,target.id,Date.now()+30*minute);
+          const now=Date.now(), expires=now+30*minute, codeHash=hash(body.code);
+          const consumed = db.prepare("DELETE FROM enrollment_tokens WHERE user_id=? AND hash=? AND expires>?").run(target.id,codeHash,now);
+          if (!consumed.changes) {
+            if (!db.prepare("DELETE FROM email_tokens WHERE user_id=? AND hash=? AND expires>?").run(target.id,codeHash,now).changes) unauthorized();
+            if (!db.prepare('INSERT INTO recovery_principals(hash,actor,expires,context) SELECT ?,actor,?,context FROM recovery_principals WHERE hash=? AND expires>?')
+              .run(grant,expires,codeHash,now).changes) unauthorized();
+          }
+          db.prepare("DELETE FROM enrollment_grants WHERE expires<=?").run(now);
+          db.prepare("INSERT INTO enrollment_grants VALUES(?,?,?)").run(grant,target.id,expires);
         });
         setCookie(res,"recovery",recovery,1800);
       }
@@ -238,8 +247,16 @@ export function createAuth(db: DatabaseSync, publicOrigin: string, sendMail = se
       return transaction(db,() => {
         const userId = grantUser(grant);
         if (!userId || db.prepare("SELECT 1 FROM passkeys WHERE id=?").get(credential.id)) unauthorized();
-        const principal=db.prepare('SELECT actor FROM recovery_principals WHERE hash=?').get(grant);
-        if (principal && !store.allowsRecovery(String(principal.actor),userId,'$.user.passkeys.create')) unauthorized();
+        const principal=db.prepare('SELECT actor,context FROM recovery_principals WHERE hash=?').get(grant);
+        if (principal) {
+          const actor=String(principal.actor);
+          let allowed=false;
+          try {
+            allowed=principal.context ? store.contextAllows(actor,JSON.parse(String(principal.context)),userId,'methods','$.user.passkeys.create',{}) :
+              store.allowsRecovery(actor,userId,'$.user.passkeys.create');
+          } catch { unauthorized(); }
+          if (!allowed) unauthorized();
+        }
         db.prepare("INSERT INTO passkeys VALUES(?,?,?,?)").run(credential.id,userId,credential.publicKey,credential.counter);
         db.prepare("DELETE FROM enrollment_grants WHERE hash=?").run(grant);
         setCookie(res,"recovery","",0);

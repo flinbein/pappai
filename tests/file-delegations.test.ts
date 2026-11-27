@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdtempSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { request } from 'node:http';
 import { EventEmitter } from 'node:events';
 import { DatabaseSync } from 'node:sqlite';
@@ -10,6 +10,7 @@ import { FileDelegations } from '../src/file-delegations.ts';
 import { Controller } from '../src/controller.ts';
 import { Store } from '../src/store.ts';
 import { sandboxPrivateTmp } from '../src/sandbox.ts';
+import { openMountSource } from '../src/file-view.ts';
 
 const linux = {skip:process.platform !== 'linux'};
 function stream(socketPath: string, key: string, method: string, data?: Buffer) {
@@ -159,7 +160,7 @@ test('successful reply, cancellation, timeout and executor loss revoke the assig
     run:{type:'process',settings:{cwd:'/',command:'node',features:{read:{
       type:'method',version:'1',description:'read'}}}},executors:{mode:'oneShot'}}});
   const jobs = [];
-  const runner=Object.assign(new EventEmitter(),{dispatch:job=>jobs.push(job), rejectReply(){}, stop(){}});
+  const runner=Object.assign(new EventEmitter(),{dispatch:job=>jobs.push(job),deliver(){},rejectReply(){},stop(){}});
   const files=new FileDelegations(store);
   const controller=new Controller(store,runner,files);
   const dir=mkdtempSync(join(tmpdir(),'pappai-finish-'));
@@ -174,6 +175,8 @@ test('successful reply, cancellation, timeout and executor loss revoke the assig
     const job=jobs.at(-1);
     const endpoint=files.socketFor(job.id)!;
     const params={callId:job.id,path,mode:'read'};
+    await assert.rejects(files.executorRequest(job.id,app.id,'files.open',params),/denied/);
+    runner.emit('started',job);
     const {handle}=await files.executorRequest(job.id,app.id,'files.open',params);
     if (outcome==='result') {
       runner.emit('reply',{id:job.id,appId:app.id,result:'done'});
@@ -204,4 +207,52 @@ test('revoking the caller generation prevents new delegated opens while an alrea
   service.revokeView('sending-worker');
   await assert.rejects(open(),/denied/);
   assert.equal((await stream(socket,handle,'GET')).body.toString(),'before');
+});
+
+test('delegated opens and profile inputs intersect the caller mount, inline rules and current subject permissions',linux,async t=>{
+  const db=new DatabaseSync(':memory:');
+  const store=new Store(db);
+  const actor=store.ensureAdmin('files@example.test').id;
+  const service=new FileDelegations(store);
+  const dir=mkdtempSync('/var/tmp/pappai-subject-files-');
+  const path=join(dir,'input'),other=join(dir,'other');
+  writeFileSync(path,'authorized');
+  writeFileSync(other,'unavailable');
+  t.after(()=>{ service.close(); db.close(); rmSync(dir,{recursive:true,force:true}); });
+  const subject=store.create('~','team',{name:'reader',permissions:[{read:dir}]}).id;
+  const context=store.restrict(actor,undefined,[subject],[{read:path}]);
+  const mounted=store.fileSnapshot(actor);
+  service.callOpened('c',actor,'target',{read:[dir+'/']},undefined,mounted,context);
+  service.callAssigned('c','worker');
+  const socket=service.socketFor('worker')!;
+  const open=(file:string)=>service.executorRequest('worker','target','files.open',{callId:'c',path:file,mode:'read'});
+  const {handle}=await open(path);
+  assert.equal((await stream(socket,handle,'GET')).body.toString(),'authorized');
+  assert.equal(service.readProfileFile(actor,path,undefined,mounted,context).toString(),'authorized');
+  await assert.rejects(open(other),/denied/);
+  assert.throws(()=>service.readProfileFile(actor,path,undefined,{...mounted,allows:()=>false},context),/denied/);
+  store.manage(actor,subject,'$.permissions.set',{permissions:[]});
+  await assert.rejects(open(path),/denied/);
+  assert.throws(()=>service.readProfileFile(actor,path,undefined,mounted,context),/denied/);
+});
+
+test('delegated reads and creates stay within the directory bound to a terminal',linux,async t=>{
+  const base=mkdtempSync('/var/tmp/pappai-pinned-file-'), dir=join(base,'work');
+  mkdirSync(dir);
+  const path=join(dir,'input'), result=join(dir,'result');
+  writeFileSync(path,'original');
+  const fd=openMountSource(dir);
+  const mounted={sandbox:{read:[],write:[dir],network:false},allows:()=>true,mountSources:new Map([[dir,fd]])};
+  const files=new FileDelegations({fileSnapshot:()=>mounted});
+  t.after(()=>{ files.close(); closeSync(fd); rmSync(base,{recursive:true,force:true}); });
+  files.callOpened('pinned','user','app',{create:[result]},undefined,mounted);
+  files.callAssigned('pinned','receiver');
+  assert.equal(files.readProfileFile('user',path,undefined,mounted).toString(),'original');
+  renameSync(dir,join(base,'moved'));
+  mkdirSync(dir);
+  writeFileSync(path,'replacement');
+  assert.throws(()=>files.readProfileFile('user',path,undefined,mounted));
+  await assert.rejects(files.executorRequest('receiver','app','files.open',{callId:'pinned',path:result,mode:'create'}));
+  assert.equal(existsSync(result),false);
+  assert.equal(existsSync(join(base,'moved','result')),false);
 });

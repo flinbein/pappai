@@ -26,6 +26,52 @@ function setup(t,real = false) {
   return {admin,store,runner,ctrl,app,call};
 }
 
+test('waiting and held-first calls recheck the current subject while an accepted receiver keeps its own authority',async t=>{
+  const {admin,store,ctrl,runner,app,call}=setup(t);
+  const id=app('receiver',manifest({go:method},'',{mode:'oneShot',poolSize:1}));
+  await call(id,'$.lifecycle.start');
+  const allow=[{node:id,methods:'go'}];
+  const subject=store.create('~','team',{name:'subject',permissions:allow}).id;
+  const restricted=()=>call(id,'go',{}, {restrictPermissions:[subject]});
+  const first=restricted();
+  const job=runner.jobs[0];
+  assert.equal(job.from,admin);
+  runner.emit('started',job);
+  assert.equal(runner.writes.length,1);
+  const waiting=assert.rejects(restricted(),/permission/i);
+  await call(subject,'$.permissions.set',{permissions:[]});
+  const response=new Promise(resolve=>{ runner.respond=(_worker,_id,value)=>resolve(value); });
+  runner.emit('request',{workerId:job.id,appId:id,id:'own',method:'checkPermissions',params:{
+    action:{type:'call',node:subject,method:'$.permissions.set',data:{permissions:[]}}}});
+  assert.deepEqual(await response,{result:{allowed:true}});
+  runner.emit('reply',{...job,result:'ok'});
+  assert.equal(await first,'ok');
+  runner.emit('exit',job);
+  await waiting;
+  assert.equal(runner.jobs.length,1);
+  await call(subject,'$.permissions.set',{permissions:allow});
+  const held=assert.rejects(restricted(),/permission/i);
+  const second=runner.jobs[1];
+  await call(subject,'$.permissions.set',{permissions:[]});
+  runner.emit('started',second);
+  await held;
+  assert.equal(runner.writes.length,1);
+  assert.deepEqual(runner.stops,[second.id]);
+});
+
+test('a PROFILE method permission check and dispatch use the same default input',async t=>{
+  const {admin,store,ctrl}=setup(t);
+  const profile=store.create('~','profile',{name:'runner profile',permissions:[]}).id;
+  ctrl.hooks.profileCall=async (_actor,_profile,_method,data)=>data;
+  const action={type:'call',node:profile,method:'example.setup',data:null};
+  const options={permissions:[{node:profile,methods:{'example.setup':{type:'object'}}}]};
+  assert.deepEqual(ctrl.checkPermissions(admin,{action,...options}),{allowed:true});
+  assert.deepEqual(await ctrl.call(admin,{...action,...options}),{});
+  const onlyNull={permissions:[{node:profile,methods:{'example.setup':{type:'null'}}}]};
+  assert.deepEqual(ctrl.checkPermissions(admin,{action,...onlyNull}),{allowed:false});
+  await assert.rejects(ctrl.call(admin,{...action,...onlyNull}),/permission/i);
+});
+
 test('a subscribed persistent process calls the publisher while both of its oneShot slots are occupied', {timeout:12000}, async t=>{
   const {runner,app,call} = setup(t,true);
   const publisher = app('publisher',manifest({start:method,echo:method,work:event},`

@@ -45,6 +45,8 @@ Starting an APP enables it to accept work. The first matching record starts a pr
 
 A fully unrestricted applicable chain of `permissions:null` allows a trusted process to run directly on the OS. If the APP has restrictions, the Linux runner uses bubblewrap and fails the launch if it cannot establish isolation.
 
+A sandboxed executor can invoke the installed `pappai` command as the APP. Use `pappai -r NODE_ID run PROGRAM` to start a subprocess under both nodes' permissions. Add `--with-rpc` before `run` when the child needs to call the controller. [CLI and sandbox semantics](../terminal-cli.md#command-options)
+
 The Linux runner builds mounts from the APP's allowed paths and exclusions. An explicit file grant requires an existing absolute path without symbolic links. The sandbox gets new `/proc` and `/dev` mounts, the APP's private directory as `/tmp`, and read-only system directories `/bin`, `/sbin`, `/lib`, `/usr` and `/etc` subject to masks. Selecting a working directory does not grant access to its contents. With network access denied, the process gets a separate network namespace.
 
 The host limits process lifetime when `maxLifetimeMs` is set. On shutdown it sends SIGINT, then SIGKILL after 10 seconds. If the host crashes, bubblewrap and the PID namespace terminate sandboxed processes. Background descendants of trusted processes running outside the sandbox can outlive the host. Each runner host belongs to one controller.

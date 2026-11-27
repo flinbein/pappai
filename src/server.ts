@@ -3,7 +3,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { Store } from './store.ts';
+import { Store, type PermissionContext } from './store.ts';
 import { RunnerRegistry } from './runner-registry.ts';
 import { initTempRoot } from './sandbox.ts';
 import { AppHttpSockets, createAppHttpRouter } from './app-http.ts';
@@ -48,11 +48,18 @@ export function createService({ db, origin, webRoot = process.env.PAPPAI_WEB_ROO
         if (job.sandbox) (job.runtimeMounts ??= []).push({source:fileSocket,target:destination,readonly:true});
         job.settings={...job.settings,env:{...job.settings.env,PAPPAI_FILES_SOCKET:job.sandbox ? destination : fileSocket}};
       }
+      if (job.runnerType==='process' && job.sandbox && process.platform==='linux') {
+        const view=files.executorView(job.id);
+        if (!view) throw Error('Missing executor file view');
+        const source=terminals.executorSocket(job.id,job.appId,view,()=>controller.isCurrentExecutor(job.appId,job.id));
+        (job.runtimeMounts ??= []).push({source,target:'/run/pappai/terminal.sock',readonly:true});
+      }
       if (job.runnerType==='process' && job.mode==='persistent' && store.get(job.appId)?.httpName && store.hasHttp(job.appId)) sockets.start(job);
     },
     executorProfileRevoked:id=>files.revokeView(id),
     executorRetire(id) { sockets.retire(id); },
     executorExit(id,appId) {
+      terminals.closeExecutor(id);
       files.executorExit(id);
       sockets.exit(id);
       sources.applyPending(appId);
@@ -60,6 +67,7 @@ export function createService({ db, origin, webRoot = process.env.PAPPAI_WEB_ROO
     callOpened:files.callOpened.bind(files), callAssigned:files.callAssigned.bind(files),
     callClosed:files.callClosed.bind(files), unfinished:files.unfinished.bind(files),
     executorRequest:files.executorRequest.bind(files),
+    executorView:id=>files.executorView(id),
     manifestChanged:id=>sources.manifestChanged(id), beforeRestart:id=>sources.applyPending(id),
     profileFeatures:()=>runner.profileFeatures(),
     profileCliFeatures:()=>runner.profileCliFeatures(),
@@ -68,20 +76,20 @@ export function createService({ db, origin, webRoot = process.env.PAPPAI_WEB_ROO
     isCodex:name=>runner.isCodex(name),
     profileCall:(...args)=>runner.profileCall(...args),
     userStopped() { terminals.checkSessions(); events.checkSessions(); },
-    system(actor,node,method,data) {
-      const registry=runner.system(actor,node.id,method,data);
+    system(actor,node,method,data,context,callerView) {
+      const registry=runner.system(actor,node.id,method,data,context);
       if (registry.handled) return registry;
       if (method==='$.user.recovery.send' && node.type==='user')
-        return {handled:true,result:auth.requestMail(actor,node.id)};
+        return {handled:true,result:auth.requestMail(actor,node.id,context)};
       if((method==='$.lifecycle.start' || method==='$.app.forceStart') && node.type==='app' && !runner.available((node.manifest as any)?.run?.type))
         throw Error('Runner unavailable');
-      return sources.system(actor,node,method,data);
+      return sources.system(actor,node,method,data,context,callerView);
     },
   });
-  runner.setProfileReader((actor,path,worker,view)=>{
+  runner.setProfileReader((actor,path,worker,view,context)=>{
     if (store.get(actor)?.status!=='working' || (worker && !controller.isCurrentExecutor(actor,worker)))
       throw Error('Inactive caller');
-    return files.readProfileFile(actor,path,worker,view);
+    return files.readProfileFile(actor,path,worker,view,context);
   });
   sources = new ManifestSources(store,{
     validateSettings:(name,settings)=>runner.validateSettings(name,settings),
@@ -103,12 +111,14 @@ export function createService({ db, origin, webRoot = process.env.PAPPAI_WEB_ROO
     if(app.status!=='working') return null;
     return store.hasHttp(app.id) ? sockets.socket(app.id) : undefined;
   });
-  function rpc(actor:string,method:string,params:any,signal:AbortSignal,view?:FileView) {
+  function rpc(actor:string,method:string,params:any,signal:AbortSignal,view?:FileView,context?:PermissionContext) {
+    if (context) store.validateContext(actor,context);
     switch (method) {
-      case 'discover': return store.visible(actor);
-      case 'help': return controller.help(actor,params);
-      case 'call': return controller.call(actor,params,signal,view);
-      case 'publish': return controller.publish(actor,params,undefined,signal);
+      case 'discover': return controller.discover(actor,params,context);
+      case 'help': return controller.help(actor,params,context);
+      case 'checkPermissions': return controller.checkPermissions(actor,params,context,view);
+      case 'call': return controller.call(actor,params,signal,view,context);
+      case 'publish': return controller.publish(actor,params,undefined,signal,context);
       default: throw Error('Unknown RPC method');
     }
   }
@@ -191,14 +201,15 @@ export function createService({ db, origin, webRoot = process.env.PAPPAI_WEB_ROO
   });
   const terminals = attachTerminals(server, address, store, auth.user, {
     prepareCli:runner.prepareCli.bind(runner),
-    rpc:async (actor,method,params,view,signal)=>{
+    rpc:async (actor,method,params,view,signal,context)=>{
       if (method==='me') {
+        if (context) store.validateContext(actor,context);
         const node=store.get(actor);
         if (!node) throw Error('Unknown terminal identity');
         const {id,parentId,type,name}=node;
         return {id,parentId,type,name};
       }
-      return rpc(actor,method,params,signal,view);
+      return rpc(actor,method,params,signal,view,context);
     },
   });
   const events = attachEvents(server,address,store,auth.user,controller);

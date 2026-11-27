@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
@@ -8,6 +8,7 @@ import { setTimeout } from 'node:timers/promises';
 import { ManifestSources } from '../src/manifest-sources.ts';
 import { Store } from '../src/store.ts';
 import { prepare } from '../src/manifest.ts';
+import { openMountSource } from '../src/file-view.ts';
 
 async function until(check) {
   for (let i = 0; i < 100; ++i) {
@@ -113,3 +114,31 @@ test('delegated package installation rejects a later symlink to another authoriz
     await until(()=>store.get(id).status==='error');
     assert.match(store.get(id).lastIssue,/denied/i);
   });
+
+test('restricting a file-based installation checks the caller view before creating the APP', {skip:process.platform!=='linux'},t=>{
+  const {store,manager,manifest}=setup(t);
+  const dir=mkdtempSync('/var/tmp/pappai-limited-package-');
+  t.after(()=>rmSync(dir,{recursive:true,force:true}));
+  const file=join(dir,'manifest.json');
+  writeFileSync(file,JSON.stringify(manifest));
+  const actor=store.ensureAdmin('installer@example.test').id;
+  const subject=store.create('~','team',{name:'operator',permissions:[{node:'~',methods:'$.children.createApp'}]}).id;
+  const context=store.restrict(actor,undefined,[subject]);
+  const install=()=>manager.system(actor,store.get('~'),'$.children.createApp',
+    {name:'package',source:{file},permissions:null},context);
+  assert.throws(install,/denied/);
+  const mount={sandbox:{read:[],write:[],network:false},allows:()=>false};
+  assert.throws(()=>manager.system(actor,store.get('~'),'$.children.createApp',
+    {name:'package',source:{file},permissions:null},undefined,mount),/denied/);
+  assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM nodes WHERE name='package'").get().n,0);
+  store.manage(actor,subject,'$.permissions.set',{permissions:[{node:'~',methods:'$.children.createApp'},{read:file}]});
+  assert.ok(install().result.id);
+  const fd=openMountSource(file);
+  try {
+    renameSync(file,file+'.previous');
+    writeFileSync(file,JSON.stringify(manifest));
+    const view={...store.fileSnapshot(actor,context),mountSources:new Map([[file,fd]])};
+    assert.throws(()=>manager.system(actor,store.get('~'),'$.children.createApp',
+      {name:'replacement',source:{file},permissions:null},context,view),/changed|denied/);
+  } finally { closeSync(fd); }
+});

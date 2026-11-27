@@ -18,6 +18,8 @@ On Linux a method call can grant its executor temporary access to files belongin
 | `create` | Create a new file exclusively. An existing name returns `EEXIST`. The parent directory must exist. |
 | `write` | Write an existing file or create a new one. Add `read` if reading is also required. |
 
-The controller checks the caller's current file permissions at open time. A sandboxed APP's `/tmp` maps to its private temporary directory. A grant belongs to a single call and ends on reply, failure, cancellation, timeout or disconnection of the calling executor. Interrupted writes may leave partial content. The handler can complete a call without using a grant.
+The controller checks the caller's current file permissions at open time. For a restricted call, each subject and inline permission list must also allow the file operation. A caller using a terminal or APP executor can delegate only files available in that launch. Its private `/tmp` keeps the same meaning when a receiver opens a delegated file. [Permission restrictions](permissions.md)
+
+A grant belongs to a single call and ends on reply, failure, cancellation, timeout or disconnection of the calling executor. Interrupted writes may leave partial content. The handler can complete a call without using a grant.
 
 Process executors can copy files in both directions or stream them through a private socket. [File protocol](dev/runners/files.md)

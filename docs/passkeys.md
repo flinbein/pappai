@@ -28,6 +28,8 @@ Select email recovery on the sign-in form. The USER needs permission for `$.user
 
 Set `PAPPAI_SMTP_HOST`, `PAPPAI_SMTP_FROM`, `PAPPAI_SMTP_USER` and `PAPPAI_SMTP_PASSWORD` in the controller environment. TLS on port 465 is the default. Use `PAPPAI_SMTP_TLS=starttls` for STARTTLS on port 587. Override the port with `PAPPAI_SMTP_PORT`.
 
+When a restricted call requests the email, the controller binds its subjects and inline permission rules to the code. The registration check evaluates those restrictions with the current permissions of the caller and subjects.
+
 **Administrator recovery** uses the same `admin` command as initial setup. Running it for an existing email moves the account to the workspace root, grants full permissions, and revokes existing keys and sessions. To add another key while keeping existing access, use `otp`.
 
 Each session belongs to a specific passkey. Sessions last up to thirty days and expire after one day of inactivity. Signing out ends the current session. Stopping a USER with `$.lifecycle.stop({})` revokes every session and closes its terminals. After `$.lifecycle.start({})` the USER can sign in again with a registered passkey.

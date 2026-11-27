@@ -67,15 +67,56 @@ test('PROFILE CLI discovery, separate permits and interactive credential import'
     const cliResult=async (...args:string[])=>JSON.parse((await exec('pappai',args)).stdout);
     assert.deepEqual(await cliResult('me'),{id:'~',parentId:null,type:'workspace',name:'workspace'});
     assert.deepEqual(await cliResult('-u',user,'me'),{id:user,parentId:'~',type:'user',name:'Operator'});
+    const team=store.create('~','team',{name:'Support',permissions:[
+      {node:profile,discover:true,cli,methods:'fixture.setup'},
+    ]}).id;
+    assert.equal((await cliResult('--as',team,'me')).type,'team');
+    const restricted=await cliResult('--restrict',team,'discover');
+    assert.deepEqual(restricted.map((entry:{id:string})=>entry.id),['~',profile]);
+    assert.deepEqual(await cliResult('--permissions','[]','-r',team,'discover'),[]);
+    assert.deepEqual(await cliResult('--restrict-to',team,'help','~'),{});
+    await assert.rejects(cliResult('-r',team,'call',user,'$.node.get'),/Permission denied/);
+    const check=JSON.stringify({subject:team,action:{type:'call',node:profile,method:'fixture.setup',data:{}}});
+    assert.deepEqual(await cliResult('checkPermissions',check),{allowed:true});
+    await assert.rejects(cliResult('-u',user,'checkPermissions',check),/Permission denied/);
+    const restrictedChild=await exec('pappai',['-r',team,'--with-rpc','run','pappai','discover'],{cwd:'/tmp'});
+    assert.deepEqual(JSON.parse(restrictedChild.stdout),restricted);
+    await assert.rejects(exec('pappai',['--with-rpc','run','pappai','-u',user,'me'],{cwd:'/tmp'}),/administrator socket/);
+    await assert.rejects(exec('pappai',['run','pappai','me'],{cwd:'/tmp'}),/RPC is unavailable/);
+    await assert.rejects(exec('/bin/sh',['-c',
+      'printf "a\\000b" | pappai run /bin/sh -c \'cat; printf "%s" "$1" >&2; exit 17\' example --with-rpc'],
+      {cwd:'/tmp',encoding:'buffer'}), (error:Error & {code:number;stdout:Buffer;stderr:Buffer})=>{
+        assert.equal(error.code,17);
+        assert.deepEqual(error.stdout,Buffer.from([97,0,98]));
+        assert.equal(error.stderr.toString(),'--with-rpc');
+        return true;
+      });
+    const largePipe=await exec('/bin/sh',['-c','head -c 524288 /dev/zero | pappai run cat | wc -c'],{cwd:'/tmp'});
+    assert.equal(Number(largePipe.stdout),524288);
+    const embedded=store.create('~','app',{name:'Sandboxed scheduler',permissions:[{node:team,checkPermissions:true}],
+      manifest:{run:{type:'process',settings:{command:'/usr/local/bin/node',cwd:'/tmp',features:{
+        probe:{type:'method',description:'Check the scheduler launch identity.',version:'1'},
+      },args:['-e',`
+        const {execFileSync}=require('node:child_process');
+        require('node:readline').createInterface({input:process.stdin}).once('line',line=>{
+          const request=JSON.parse(line);
+          const args=['-r',request.data.subject,'--with-rpc','run','pappai','me'];
+          const result=JSON.parse(execFileSync('pappai',args,{encoding:'utf8'}));
+          process.stdout.write(JSON.stringify({id:request.id,result})+'\\n',()=>process.exit(0));
+        });
+      `]}},executors:{mode:'oneShot'}}}).id;
+    await controller.call(admin.id,{node:embedded,method:'$.lifecycle.start'});
+    const identity=await controller.call(admin.id,{node:embedded,method:'probe',data:{subject:team},timeoutMs:10000});
+    assert.equal(identity.id,embedded);
     assert.ok((await cliResult('discover')).some((entry:any)=>entry.id===profile));
     assert.ok((await cliResult('help','~'))['$.runners']);
     assert.deepEqual(await cliResult('call',user,'$.node.get'),await controller.call(admin.id,{node:user,method:'$.node.get'}));
     await assert.rejects(cliResult('-u',user,'call','~','$.runners.list'),/Permission denied/);
-    await assert.rejects(cliResult('-u',profile,'me'),/active USER or APP/);
+    await assert.rejects(cliResult('-u',profile,'me'),/active|Permission denied/);
     const testApp=store.create('~','app',{name:'Impersonation fixture',manifest:{
       run:{type:'process',settings:{command:'/bin/true',cwd:'/tmp',features:{}}},executors:{mode:'oneShot'},
     }}).id;
-    await assert.rejects(cliResult('-u',testApp,'me'),/active USER or APP/);
+    await assert.rejects(cliResult('-u',testApp,'me'),/active|Permission denied/);
     store.setStatus(testApp,'working');
     assert.equal((await cliResult('-u',testApp,'me')).id,testApp);
     assert.match((await exec('pappai',['cli',profile,cli])).stdout,/"configured":\s*true/);

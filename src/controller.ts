@@ -1,4 +1,4 @@
-import type { FileView } from './file-delegations.ts';
+import { callerFileView, type FileView } from './file-delegations.ts';
 import { randomUUID } from 'node:crypto';
 import type { EventEmitter } from 'node:events';
 import { prepare } from './manifest.ts';
@@ -7,26 +7,26 @@ import { matchesName, validNames, validNodes, type Rule } from './permits.ts';
 import { compileSubscriptions, changeSubscriptions } from './subscriptions.ts';
 import { systemContract } from './system-contract/index.ts';
 import { DeliveryReports, type DeliveryNotice } from './delivery-reports.ts';
-import { normalizeCreateTeamData, type Store } from './store.ts';
+import { normalizeCallData, type PermissionContext, type Store } from './store.ts';
 import type { ProcessRunner, Assignment, InputRecord } from './runner.ts';
 
 const DAY = 86_400_000;
 type Work = InputRecord & { id:string; data:unknown; priority:number; canEvict:boolean };
 type Pending = {
-  appId:string; version?:string; item:Work; worker?:string;
+  appId:string; version?:string; item:Work; worker?:string; authorize:()=>void;
   resolve:(value:unknown)=>void; reject:(issue:Error)=>void; timer:NodeJS.Timeout;
 };
 type Worker = {
-  id:string; appId:string; profileId?:string; sandboxState?:string; profileMcpNetwork?:boolean; runnerType:string; persistent:boolean; started:boolean;
+  id:string; appId:string; profileId?:string; profileMcpNetwork?:boolean; runnerType:string; persistent:boolean; started:boolean;
   retiring:boolean; profileRevoked?:boolean; stopRequested?:boolean; writing?:string; calls:Set<string>; requests:number; abort:AbortController;
   idleTimeoutMs?:number|null; idle?:NodeJS.Timeout; first?:Work; maxRestarts:number;
 };
 type Config = ReturnType<typeof prepare>;
 type Runner = Pick<EventEmitter,'on'> & Pick<ProcessRunner,'dispatch'|'stop'|'rejectReply'|'deliver'|'respond'|'notify'>;
 export type ControllerHooks = {
-  system?:(actor:string,node:NonNullable<ReturnType<Store['get']>>,method:string,data:any)=>{handled:boolean;result?:any}|undefined;
+  system?:(actor:string,node:NonNullable<ReturnType<Store['get']>>,method:string,data:any,context?:PermissionContext,callerView?:FileView)=>{handled:boolean;result?:any}|undefined;
   userStopped?:()=>void;
-  profileCall?:(actor:string,profileId:string,method:string,data:any,callerWorkerId?:string,signal?:AbortSignal,timeoutMs?:number,callerView?:FileView)=>Promise<unknown>;
+  profileCall?:(actor:string,profileId:string,method:string,data:any,callerWorkerId?:string,signal?:AbortSignal,timeoutMs?:number,callerView?:FileView,context?:PermissionContext,authorize?:()=>void)=>Promise<unknown>;
   profileCliFeatures?:()=>Map<string,{type:'cli';version:string;description:string;doc?:string;schema?:{input?:unknown}}>;
   profileFeatures?:()=>string[];
   workspaceFeatures?:()=>Map<string,{type:string;description:string;version:string;schema?:unknown}>;
@@ -38,7 +38,8 @@ export type ControllerHooks = {
   executorProfileRevoked?:(workerId:string)=>void;
   executorRetire?:(workerId:string,appId:string)=>void;
   executorExit?:(workerId:string,appId:string)=>void;
-  callOpened?:(id:string,actor:string,target:string,params:any,callerWorkerId?:string,callerView?:FileView)=>void;
+  callOpened?:(id:string,actor:string,target:string,params:any,callerWorkerId?:string,callerView?:FileView,context?:PermissionContext)=>void;
+  executorView?:(id:string)=>FileView|undefined;
   callAssigned?:(id:string,workerId:string)=>void;
   callClosed?:(id:string)=>void;
   unfinished?:(id:string)=>boolean;
@@ -102,8 +103,11 @@ export class Controller {
       if (!worker.first || worker.retiring) return;
       const item = worker.first;
       worker.first = undefined;
-      if (item.method && !this.pending.has(item.id)) { this.retire(worker,true); return; }
-      try { this.runner.deliver(id,item); }
+      if (!this.admissible(item)) { this.retire(worker,true); return; }
+      try {
+        if (item.method) this.hooks.callAssigned?.(item.id,id);
+        this.runner.deliver(id,item);
+      }
       catch (error) { this.exited({id,appId,issue:(error as Error).message,startFailed:true}); }
     });
     runner.on('written', ({workerId,id,appId}) => {
@@ -257,9 +261,9 @@ export class Controller {
       const changed=(app.profile ?? undefined)!==worker.profileId;
       let denied=false;
       try {
-        const sandbox=this.store.sandbox(app.id);
-        if (!changed && worker.sandboxState===JSON.stringify(sandbox) && (worker.profileMcpNetwork===undefined ||
-          worker.profileMcpNetwork===this.store.profileMcpNetwork(app,sandbox?.network ?? true))) continue;
+        this.store.profileFor(app);
+        if (!changed && (worker.profileMcpNetwork===undefined ||
+          worker.profileMcpNetwork===this.store.profileMcpNetwork(app,this.store.sandbox(app.id)?.network ?? true))) continue;
       } catch { denied=true; }
       if (!worker.profileRevoked) {
         worker.profileRevoked=true;
@@ -344,7 +348,14 @@ export class Controller {
     worker.calls.add(id);
     pending.worker=worker.id;
     clearTimeout(worker.idle);
-    this.hooks.callAssigned?.(id,worker.id);
+    if (worker.first?.id!==id) this.hooks.callAssigned?.(id,worker.id);
+  }
+  private admissible(item:Work) {
+    if (!item.method) return true;
+    const call=this.pending.get(item.id);
+    if (!call) return false;
+    try { call.authorize(); return true; }
+    catch (error) { this.finish(item.id,error as Error); return false; }
   }
   private next(appId:string) {
     const queue = this.queues.get(appId);
@@ -363,6 +374,7 @@ export class Controller {
     }
     const item = queue.shift()!;
     if (!queue.length) this.queues.delete(appId);
+    if (!this.admissible(item)) { this.next(appId); return; }
     const worker:Worker = existing ?? {
       id:item.id,appId,profileId:app.profile ?? undefined,runnerType:config.runnerType,persistent:config.mode === 'persistent',started:false,
       retiring:false,calls:new Set(),requests:0,abort:new AbortController(),idleTimeoutMs:config.idleTimeoutMs,
@@ -380,7 +392,6 @@ export class Controller {
           holdFirst:!!worker.first,settings:{...config.settings,...(config.settings.env && {env:{...config.settings.env}})},
           sandbox:this.store.sandbox(appId),maxLifetimeMs:config.maxLifetimeMs};
         if (worker.profileId) {
-          worker.sandboxState=JSON.stringify(job.sandbox);
           job.profileMcpNetwork=this.store.profileMcpNetwork(app,job.sandbox?.network ?? true);
           const mcp=job.settings.mcp;
           if (mcp && typeof mcp==='object' && 'profile' in mcp && Array.isArray(mcp.profile) && mcp.profile.length) {
@@ -397,32 +408,40 @@ export class Controller {
     }
     if (!worker.persistent && queue.length && this.store.get(appId)?.status === 'working') this.next(appId);
   }
-  async call(actor:string,params:any,signal?:AbortSignal,callerView?:FileView):Promise<any> {
-    return this.invoke(actor,params,signal,undefined,callerView);
+  async call(actor:string,params:any,signal?:AbortSignal,callerView?:FileView,context?:PermissionContext):Promise<any> {
+    return this.invoke(actor,params,signal,undefined,callerView,context);
   }
-  private async invoke(actor:string,params:any,signal?:AbortSignal,worker?:Worker,callerView?:FileView):Promise<any> {
+  private requestContext(actor:string,params:any,inherited?:PermissionContext) {
+    if (!inherited && params?.restrictPermissions===undefined && params?.permissions===undefined) return undefined;
+    return this.store.restrict(actor,inherited,params?.restrictPermissions,params?.permissions);
+  }
+  private async invoke(actor:string,params:any,signal?:AbortSignal,worker?:Worker,callerView?:FileView,inherited?:PermissionContext):Promise<any> {
     if (this.closing) throw Error('Controller shutting down');
     const {node:appId,method,version} = params;
-    const input = method === '$.children.createTeam' && params.data && typeof params.data === 'object' && !Array.isArray(params.data)
-      ? normalizeCreateTeamData(params.data) : params.data;
-    const data = typeof method === 'string' && method.startsWith('$.') && input === undefined ? {} : input;
     if (typeof appId !== 'string' || typeof method !== 'string') throw Error('Expected node and method');
-    const permitted = worker && !method.startsWith('$.') && this.workers.get(worker.id) === worker
-      ? this.store.allowsLiveExecutor(actor,appId,method,data)
-      : this.store.allows(actor,appId,method,data);
-    if (!permitted) throw Error('Permission denied');
+    const context=this.requestContext(actor,params,inherited);
     const app = this.store.get(appId);
+    const data=normalizeCallData(method,params.data,app?.type);
+    const authorize = () => {
+      const permitted = context ? this.store.contextAllows(actor,context,appId,'methods',method,data) :
+        worker && !method.startsWith('$.') && this.workers.get(worker.id) === worker ?
+          this.store.allowsLiveExecutor(actor,appId,method,data) : this.store.allows(actor,appId,method,data);
+      if (!permitted) throw Error('Permission denied');
+    };
+    authorize();
     if (!app) throw Error('Node not found');
     if (app.type==='profile' && !method.startsWith('$.') && this.hooks.profileCall)
-      return this.hooks.profileCall(actor,app.id,method,data ?? {},worker?.id,signal,params.timeoutMs,callerView);
-    if (app.type==='workspace' && method.startsWith('runners.') && this.hooks.workspaceCall)
-      return this.hooks.workspaceCall(actor,method,data ?? {},signal,params.timeoutMs);
+      return this.hooks.profileCall(actor,app.id,method,data,worker?.id,signal,params.timeoutMs,callerView,context,authorize);
+    if (app.type==='workspace' && method.startsWith('runners.') && this.hooks.workspaceCall) {
+      if (!this.store.contextAdmin(actor,context)) throw Error('Permission denied');
+      return this.hooks.workspaceCall(actor,method,data,signal,params.timeoutMs);
+    }
     if (method.startsWith('$.')) {
       const feature = systemContract(app.type).get(method);
       if (feature?.type !== 'method') throw Error('Unknown system method');
       if (version !== undefined && version !== feature.version) throw Error('Method version mismatch');
       if (feature.input && !feature.input(data)) throw Error('Input does not match schema for ' + method);
-      return (await this.system(actor,app,method,data)) ?? null;
+      return (await this.system(actor,app,method,data,context,callerView ?? (worker && this.hooks.executorView?.(worker.id)))) ?? null;
     }
     if (app.type !== 'app' || app.status !== 'working') throw Error('APP is not working');
     const config = this.config(appId);
@@ -452,11 +471,11 @@ export class Controller {
       this.finish(id,Error(issue));
     };
     const abort = () => cancel('Call cancelled');
-    this.hooks.callOpened?.(id,actor,appId,params,worker?.id,callerView);
+    this.hooks.callOpened?.(id,actor,appId,params,worker?.id,callerView,context);
     try {
       return await new Promise((resolve,reject) => {
         const timer = setTimeout(()=>cancel('Call timed out'),timeout);
-        this.pending.set(id,{appId,item,version,timer,resolve,reject});
+        this.pending.set(id,{appId,item,version,timer,resolve,reject,authorize});
         signal?.addEventListener('abort',abort,{once:true});
         if (interrupt) {
           try {
@@ -487,7 +506,8 @@ export class Controller {
           },worker.abort.signal,worker);
           break;
         case 'help': result = this.help(appId,params); break;
-        case 'discover': result = this.store.visible(appId); break;
+        case 'discover': result = this.discover(appId,params); break;
+        case 'checkPermissions': result = this.checkPermissions(appId,params,undefined,this.hooks.executorView?.(workerId)); break;
         default:
           if (!this.hooks.executorRequest) throw Error('Unknown executor request');
           result = await this.hooks.executorRequest(workerId,appId,method,params);
@@ -499,15 +519,16 @@ export class Controller {
     try { this.runner.respond(workerId,id,response); } catch { /* Transport loss is handled by the runner. */ }
     this.armIdle(worker);
   }
-  publish(actor:string,params:any,notify?:(update:DeliveryNotice)=>void,signal?:AbortSignal) {
-    return this.sendEvent(actor,params,notify,signal);
+  publish(actor:string,params:any,notify?:(update:DeliveryNotice)=>void,signal?:AbortSignal,context?:PermissionContext) {
+    return this.sendEvent(actor,params,notify,signal,undefined,context);
   }
-  private sendEvent(actor:string,params:any,notify?:(update:DeliveryNotice)=>void,signal?:AbortSignal,worker?:Worker) {
+  private sendEvent(actor:string,params:any,notify?:(update:DeliveryNotice)=>void,signal?:AbortSignal,worker?:Worker,inherited?:PermissionContext) {
     if(this.closing) throw Error('Controller shutting down');
+    const context=this.requestContext(actor,params,inherited);
     const {event,data,version,to,delivery='none'} = params;
     const app = this.store.get(actor);
     if (typeof event !== 'string' || !/^[\w-]+(?:\.[\w-]+)*$/.test(event) || !app ||
-        !['app','user','workspace'].includes(app.type) || (app.status !== 'working' && (!worker || this.workers.get(worker.id) !== worker)))
+        !['app','user','team','workspace'].includes(app.type) || (app.status !== 'working' && (!worker || this.workers.get(worker.id) !== worker)))
       throw Error('Invalid event publication');
     if (app.type === 'app') {
       const feature = this.config(actor).features.get(event);
@@ -520,8 +541,12 @@ export class Controller {
     if (!['none','status','track'].includes(delivery)) throw Error('Invalid delivery mode');
     const timeout = params.timeoutMs ?? DAY;
     if (!Number.isInteger(timeout) || timeout < 1 || timeout > DAY) throw Error('Invalid delivery timeout');
-    const report = delivery === 'none' ? undefined : this.reports.begin(randomUUID(),delivery,timeout,
-      node=>this.store.allowsDelivery(actor,node),notify,signal);
+    const visible=(node:string)=>{
+      if (!context) return this.store.allowsDelivery(actor,node);
+      try { return this.store.contextAllows(actor,context,node,'delivery'); }
+      catch { return false; } // A pending delivery report may outlive access to a subject.
+    };
+    const report = delivery === 'none' ? undefined : this.reports.begin(randomUUID(),delivery,timeout,visible,notify,signal);
     this.route(actor,event,data,to,report);
     return report?.result() ?? {};
   }
@@ -596,10 +621,10 @@ export class Controller {
     for (const [id,issue] of rejected) this.finish(id,Error(issue));
     this.next(appId);
   }
-  private system(actor:string,node:NonNullable<ReturnType<Store['get']>>,method:string,data:any):any {
-    const external = this.hooks.system?.(actor,node,method,data);
+  private system(actor:string,node:NonNullable<ReturnType<Store['get']>>,method:string,data:any,context?:PermissionContext,callerView?:FileView):any {
+    const external = this.hooks.system?.(actor,node,method,data,context,callerView);
     if (external?.handled) return external.result;
-    const managed = this.store.manage?.(actor,node.id,method,data);
+    const managed = this.store.manage?.(actor,node.id,method,data,context);
     if (managed?.handled) {
       if (managed.changed) {
         this.revalidateProfiles();
@@ -697,9 +722,23 @@ export class Controller {
     }
     throw Error('Unknown system method');
   }
-  help(actor: string, params: any) {
+  discover(actor:string,params:any,inherited?:PermissionContext) {
+    return this.store.visible(actor,this.requestContext(actor,params,inherited));
+  }
+  checkPermissions(actor:string,params:any,inherited?:PermissionContext,view?:FileView) {
+    const context=this.requestContext(actor,params,inherited);
+    const decision=this.store.checkPermissions(actor,params,context,view?.sandbox);
+    const action=params.action;
+    if (decision.allowed && (params.subject===undefined || params.subject===actor) &&
+        (action.type==='read' || action.type==='write')) {
+      return {allowed:callerFileView(this.store,actor,view,context).allows(action.path,action.type==='write')};
+    }
+    return decision;
+  }
+  help(actor: string, params: any, inherited?:PermissionContext) {
+    const context=this.requestContext(actor,params,inherited);
     if (!params || typeof params.node !== 'string' ||
-        Object.keys(params).some(key => !['node','features','description','doc','schema'].includes(key)))
+        Object.keys(params).some(key => !['node','features','description','doc','schema','restrictPermissions','permissions'].includes(key)))
       throw Error('Invalid help parameters');
     const {features, description = true, doc = false, schema = false} = params;
     if (features !== undefined && !(features === true ||
@@ -708,9 +747,9 @@ export class Controller {
     if (![description, doc, schema].every(value => typeof value === 'boolean'))
       throw Error('Expected boolean help options');
     const app = this.store.get(params.node);
-    if (!app || !this.store.canDiscover(actor, params.node)) return {};
+    if (!app || !(context ? this.store.contextAllows(actor,context,params.node,'discover') : this.store.canDiscover(actor,params.node))) return {};
     const entries = new Map(app.type === 'app' ? this.config(app.id).features : []);
-    if (app.type==='workspace' && this.store.isAdmin(actor)) {
+    if (app.type==='workspace' && (context ? this.store.contextAdmin(actor,context) : this.store.isAdmin(actor))) {
       for (const [name,feature] of this.hooks.workspaceFeatures?.() ?? []) entries.set(name,feature);
     }
     for (const [name,feature] of systemContract(app.type)) entries.set(name,feature);

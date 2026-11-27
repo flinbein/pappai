@@ -34,7 +34,7 @@ const absolutePath = {type: 'string', pattern: '^/'};
 const paths = either(boolean, absolutePath, array(absolutePath));
 const rule = object({
   node: nodes, nodeType: types, methods: messages, cli: messages, events: messages,
-  discover: boolean, delivery: boolean, network: boolean, http: boolean, deny: boolean,
+  discover: boolean, delivery: boolean, checkPermissions: boolean, network: boolean, http: boolean, deny: boolean,
   read: paths, write: paths,
 }, []);
 export const permissions = either(nil, array(rule));

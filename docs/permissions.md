@@ -29,6 +29,39 @@ When `permissions` is omitted, a new TEAM receives these two rules. Selectors re
 
 To allocate a directory, append a file rule such as `{"write":"/workspace/operations"}` and submit the full list. File and network grants are optional. An explicit `[]` grants no additional rights. The panel's **No restrictions** button sets `permissions` to `null`. Creating an unrestricted TEAM and APP directly below it can give the APP an unrestricted path to the workspace. Check which APPs and users can modify nodes in that branch.
 
+## Checking and narrowing permissions
+
+Use the native RPC operation `checkPermissions` to ask about a particular action and its input. It returns `{"allowed":true}` or `{"allowed":false}`. Omit `subject` to check the caller. A foreign subject requires a matching permission such as `{"node":"SUPPORT_TEAM/**","checkPermissions":true}`. The controller reports the same permission error for an unavailable or unauthorized subject. The actual call checks permissions again.
+
+```json
+{"subject":"IVAN_USER","action":{"type":"call","node":"TELEGRAM_APP","method":"telegram.sendMessage","data":{"chatId":42,"text":"Ready"}}}
+```
+
+Choose the action that corresponds to the operation you intend to perform.
+
+| Action `type` | Other action fields | Permission checked |
+| --- | --- | --- |
+| `call` | `node`, `method`, optional `data` | Invoke a method with this input. |
+| `cli` | `node`, `method`, optional `input` | Launch a CLI feature with this input. |
+| `event` | `node`, `event`, optional `data` | Receive an event from the given source node. |
+| `delivery` | `node` | See delivery information about this recipient when publishing. |
+| `discover`, `help` | `node` | Discover the node directly. |
+| `read`, `write` | Absolute `path` | Read or write under the subject's filesystem policy. A self-check through a sandbox socket also observes its mount ceiling. |
+| `network`, `http` | None | Use the network or receive public HTTP requests, respectively. |
+| `checkPermissions` | `node` | Inspect the named node's permissions. |
+
+Pass `restrictPermissions` with exact node IDs to limit an operation. For example, a trusted scheduler can execute a stored request only while its author still has permission:
+
+```json
+{"node":"TELEGRAM_APP","method":"telegram.sendMessage","data":{"chatId":42,"text":"Ready"},"restrictPermissions":["IVAN_USER"]}
+```
+
+The recipient sees the scheduler as the caller. The scheduler and Ivan must both be allowed to make the call, including its data and any required administrator access. USERs, APPs and TEAMs can act as permission subjects. A TEAM contributes its own rules and its structural ancestors. Relative selectors retain their ordinary meaning for each subject. The optional `permissions` field adds an inline list of ordinary rules relative to the caller. An empty `restrictPermissions: []` adds no subjects and preserves all inherited limits. An inline `permissions: []` contributes an empty permit list.
+
+Restricted discovery first finds nodes visible to every participant, then adds the structural ancestors of those nodes. Help describes a directly discoverable node's features. Use `checkPermissions` to check whether a specific invocation of a documented feature is allowed.
+
+A queued method call is checked again before delivery. Once accepted, the receiving APP handles the method with its own permissions. Delegated file operations continue to check the caller's restrictions. A running child process retains its existing sandbox mounts when a permit changes. Later RPC requests and new launches use the current permissions. See the [CLI options and examples](dev/terminal-cli.md#command-options).
+
 ## Manage membership
 
 On the receiving TEAM, call `$.team.members.add({"memberId":"NODE_ID"})` or `$.team.members.remove({"memberId":"NODE_ID"})` for an APP, USER or PROFILE. Both require permission for the operation and member ID. Grant a constrained argument schema if a moderator should manage only certain members. Adding an existing member or removing an eligible node that is already absent succeeds. The structural parent stays the same.

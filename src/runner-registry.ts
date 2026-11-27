@@ -7,7 +7,7 @@ import { checkedEntrypoint, cliLaunchPlan, installationDirectory, preparedReleas
 import { withRunnerLock } from '../scripts/runner-storage.mjs';
 import { pathToFileURL } from 'node:url';
 import { ProcessRunner, type Assignment, type InputRecord } from './runner.ts';
-import type { Store } from './store.ts';
+import type { PermissionContext, Store } from './store.ts';
 import { compilePolicySchema } from './policy-schema.ts';
 import { ProfileMethods, type ProfileReader } from './profile-methods.ts';
 
@@ -54,8 +54,8 @@ export class RunnerRegistry extends EventEmitter {
     const calls=plan.calls ?? (key==='authorize' ? ['setup','status'] : []);
     return {...plan, calls:calls.map(key=>name+'.'+key), node};
   }
-  profileCall(actor:string,profileId:string,method:string,data:unknown,workerId?:string,signal?:AbortSignal,timeoutMs?:number,callerView?:FileView) {
-    return this.profiles.call(actor,profileId,method,data,workerId,signal,timeoutMs,callerView);
+  profileCall(actor:string,profileId:string,method:string,data:unknown,workerId?:string,signal?:AbortSignal,timeoutMs?:number,callerView?:FileView,context?:PermissionContext,authorize?:()=>void) {
+    return this.profiles.call(actor,profileId,method,data,workerId,signal,timeoutMs,callerView,context,authorize);
   }
   private store:Store;
   private hosts=new Map<string,ProcessRunner>();
@@ -165,10 +165,14 @@ export class RunnerRegistry extends EventEmitter {
   rejectReply(call:string,message:string,id=call) { this.owners.get(id)?.host.rejectReply(call,message,id); }
   stop(id:string) { this.owners.get(id)?.host.stop(id); }
 
-  system(actor:string,target:string,method:string,data:any) {
+  system(actor:string,target:string,method:string,data:any,context?:PermissionContext) {
     if(target!=='~' || !registryMethods.includes(method)) return {handled:false};
-    if(!this.store.isAdmin(actor) || !this.store.allows(actor,target,method,data)) throw Error('Permission denied');
-    return {handled:true,result:this.operation(method.slice('$.runners.'.length),data)};
+    const authorize=()=>{
+      if(!this.store.contextAdmin(actor,context) || !this.store.contextAllows(actor,context,target,'methods',method,data))
+        throw Error('Permission denied');
+    };
+    authorize();
+    return {handled:true,result:this.operation(method.slice('$.runners.'.length),data,authorize)};
   }
   isCodex(name:string) { return this.contracts.has(name) ? this.contracts.get(name)?.kind==='codex' : name==='codex'; }
   workspaceFeatures() {
@@ -200,7 +204,7 @@ export class RunnerRegistry extends EventEmitter {
     if (schema===undefined) this.store.db.prepare('DELETE FROM runner_settings_schemas WHERE name=?').run(name);
     else this.store.db.prepare('INSERT OR REPLACE INTO runner_settings_schemas VALUES(?,?)').run(name,JSON.stringify(schema));
   }
-  private async operation(op:string,data:any) {
+  private async operation(op:string,data:any,authorize:()=>void) {
     const entries=this.entries();
     if(op==='list') return entries.map(entry=>{
       const row=this.store.db.prepare('SELECT schema FROM runner_settings_schemas WHERE name=?').get(entry.name);
@@ -219,7 +223,7 @@ export class RunnerRegistry extends EventEmitter {
     if(name==='process' && (op==='delete' || data.entrypoint!==undefined)) throw Error('Built-in runner cannot be removed or replaced');
     this.busy.add(name);
     try {
-      const work=()=>this.change(op,name,entry,data.entrypoint);
+      const work=()=>{ authorize(); return this.change(op,name,entry,data.entrypoint); };
       if (entry?.managed || op==='add' || data.entrypoint!==undefined) return await withRunnerLock(this.root,name,work);
       return await work();
     } finally { this.busy.delete(name); }

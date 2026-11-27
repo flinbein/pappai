@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import { isDeepStrictEqual } from 'node:util';
-import { allowsAtLevel, filesystemProfile, fileLevel, networkAllowed, selectsNode, validNodes, validateSchemaSelector, validatePermissions } from './permits.ts';
+import { allowsAtLevel, filesystemProfile, fileLevel, mountedPermissions, networkAllowed, selectsNode, validNodes, validateSchemaSelector, validatePermissions } from './permits.ts';
 import type { Capability, NodeType, Permissions, Rule } from './permits.ts';
 
 export type NodeStatus = 'stopped' | 'working' | 'stopping' | 'error';
@@ -24,6 +24,8 @@ type NodeSettings = {name: string; email?: string; permissions?: unknown; manife
 type SqlNode = Omit<NodeRecord,'permissions'|'manifest'|'scope'> & {permissions: string; manifest: string | null; scope?: string | null};
 export type DirectoryEntry = Pick<NodeRecord,'id'|'parentId'|'type'|'name'> & {status?: NodeStatus};
 type PolicyNode = Pick<NodeRecord,'id'|'parentId'|'type'|'name'|'status'|'permissions'>;
+type PermissionLayer = {readonly subjects: readonly string[]; readonly permissions?: Rule[]};
+export type PermissionContext = readonly PermissionLayer[];
 
 export function normalizeCreateTeamData(data: NodeSettings) {
   if (data.permissions !== undefined) return data;
@@ -31,6 +33,14 @@ export function normalizeCreateTeamData(data: NodeSettings) {
     {node:'./**', methods:true, cli:true, events:true, delivery:true, discover:true},
     {node:'.', methods:['$.children.createTeam','$.children.createUser','$.children.createApp','$.children.createProfile']},
   ]};
+}
+
+export function normalizeCallData(method:string,data:any,targetType?:NodeType) {
+  if (method==='$.children.createTeam' && data && typeof data==='object' && !Array.isArray(data))
+    return normalizeCreateTeamData(data);
+  if (targetType==='profile' && !method.startsWith('$.') || targetType==='workspace' && method.startsWith('runners.'))
+    return data ?? {};
+  return method.startsWith('$.') && data===undefined ? {} : data;
 }
 
 function decode(row: SqlNode): NodeRecord {
@@ -56,8 +66,8 @@ function lineage<T extends PolicyNode>(node: T, get: (id: string) => T | undefin
   return result;
 }
 
-function activeCaller(node: PolicyNode | undefined): node is PolicyNode {
-  return !!node && (node.type === 'user' || node.type === 'app' || node.id === '~') && node.status === 'working';
+function activeCaller<T extends PolicyNode>(node: T | undefined): node is T {
+  return !!node && ['user','app','team','workspace'].includes(node.type) && node.status === 'working';
 }
 
 export class Store {
@@ -245,6 +255,10 @@ export class Store {
   isAdmin(actorId: string): boolean {
     const actor = this.get(actorId);
     if (!activeCaller(actor)) return false;
+    return this.principalAdmin(actor);
+  }
+
+  private principalAdmin(actor: NodeRecord) {
     try {
       this.profileFor(actor);
       return this.paths(actor).some(chain=>chain.every(n=>n.permissions===null));
@@ -264,7 +278,7 @@ export class Store {
 
   private principalFilePolicies(id:string) {
     const node=this.get(id);
-    if (!node || (node.type !== 'app' && node.type !== 'user' && id !== '~')) throw Error('Unknown filesystem principal');
+    if (!node || node.type === 'profile') throw Error('Unknown filesystem principal');
     this.profileFor(node);
     return this.filePolicies(node);
   }
@@ -276,15 +290,29 @@ export class Store {
     return this.fileSnapshot(actorId).allows(path,write);
   }
 
-  fileSnapshot(actorId:string) {
-    const policies=this.principalFilePolicies(actorId);
-    const sandbox=filesystemProfile(policies);
+  fileSnapshot(actorId:string, ctx?:PermissionContext, ceiling?:ReturnType<typeof filesystemProfile>) {
+    this.validateContext(actorId,ctx);
+    return this.subjectFileSnapshot(actorId,actorId,ctx,ceiling);
+  }
+
+  private subjectFileSnapshot(actorId:string, subjectId:string, ctx?:PermissionContext, ceiling?:ReturnType<typeof filesystemProfile>) {
+    const subjects=[this.principalFilePolicies(subjectId)];
+    for (const layer of ctx ?? []) {
+      for (const id of layer.subjects) subjects.push(this.principalFilePolicies(id));
+      if (layer.permissions) {
+        const owner=this.get(actorId)!;
+        const ids=this.chain(owner).map(n=>n.id);
+        subjects.push([[layer.permissions.filter(rule=>selectsNode(rule,ids,ids,owner.type,actorId,this.member))]]);
+      }
+    }
+    if (ceiling) subjects.push([[mountedPermissions(ceiling)]]);
+    const sandbox=filesystemProfile(...subjects);
     const allows=(path:string,write=false) => {
-      if (!path.startsWith('/') || path.includes('\0') || path.split('/').some(p=>p==='.' || p==='..')) return false;
+      if (typeof path !== 'string' || !path.startsWith('/') || path.includes('//') || path.includes('\0') || path.split('/').some(p=>p==='.' || p==='..')) return false;
       if (path==='/tmp' || path.startsWith('/tmp/')) return true;
       if (!sandbox) return true;
       if (['/proc','/dev','/sys','/run'].some(p=>path===p || path.startsWith(p+'/'))) return false;
-      return policies.some(chain=>chain.every(rules=>fileLevel(rules,path)>=(write?2:1)));
+      return subjects.every(policies=>policies.some(chain=>chain.every(rules=>fileLevel(rules,path)>=(write?2:1))));
     };
     return {sandbox,allows};
   }
@@ -319,6 +347,133 @@ export class Store {
   hasHttp(id:string) { return this.permitted(id,id,'http'); }
   canDiscover(actor:string,target:string) { return this.permitted(actor,target,'discover'); }
 
+  private restrictionSubject(id:string) {
+    const node=this.get(id);
+    if (!activeCaller(node) || node.type==='workspace') throw Error('Permission denied');
+    try { this.profileFor(node); } catch { throw Error('Permission denied'); }
+    return node;
+  }
+
+  private layerAllows(actor:string, layer:PermissionLayer, target:string, capability:Capability, method?:string, data?:unknown) {
+    if (!layer.subjects.every(id=>this.principalAllows(id,target,capability,method,data))) return false;
+    if (!layer.permissions) return true;
+    const owner=this.get(actor), node=this.get(target);
+    return !!owner && !!node && allowsAtLevel(layer.permissions,this.chain(owner).map(n=>n.id),
+      this.chain(node).map(n=>n.id),node.type,actor,method,capability,data,
+      (selector,types)=>this.resolveNodes(actor,selector,types),this.member);
+  }
+
+  private principalAllows(id:string,target:string,capability:Capability,method?:string,data?:unknown) {
+    if (id===target && (capability==='checkPermissions' || capability==='delivery')) return activeCaller(this.get(id));
+    return this.permitted(id,target,capability,method,data);
+  }
+
+  private authorizeSubject(actor:string, inherited:PermissionContext, id:string) {
+    if (id!==actor && (!this.principalAllows(actor,id,'checkPermissions') ||
+        !inherited.every(layer=>this.layerAllows(actor,layer,id,'checkPermissions')))) throw Error('Permission denied');
+    this.restrictionSubject(id);
+  }
+
+  validateContext(actor:string, ctx:PermissionContext|undefined) {
+    if (!ctx) return;
+    const caller=this.get(actor);
+    if (!activeCaller(caller)) throw Error('Permission denied');
+    try { this.profileFor(caller); } catch { throw Error('Permission denied'); }
+    // Grants within a single request are acquired together. Later requests must
+    // also pass every earlier bound, including after membership or rule changes.
+    const inherited:PermissionLayer[]=[];
+    for (const layer of ctx) {
+      for (const id of layer.subjects) this.authorizeSubject(actor,inherited,id);
+      inherited.push(layer);
+    }
+  }
+
+  restrict(actor:string, inherited:PermissionContext|undefined, restrictPermissions?:unknown, permissions?:unknown):PermissionContext|undefined {
+    if (restrictPermissions!==undefined && (!Array.isArray(restrictPermissions) ||
+        !restrictPermissions.every(id=>typeof id==='string'))) throw Error('Expected restrictPermissions to be an array of node IDs');
+    const subjects=[...new Set((restrictPermissions ?? []) as string[])];
+    if (!subjects.length && permissions==null) {
+      this.validateContext(actor,inherited);
+      return inherited;
+    }
+    const layer: {subjects:string[];permissions?:Rule[]}={subjects};
+    const ctx=[...(inherited ?? []),layer];
+    this.validateContext(actor,ctx);
+    if (permissions!=null) {
+      // Transient rules only narrow access. Checking the controller filesystem
+      // here would allow an ordinary caller to probe paths outside their view.
+      validatePermissions(permissions,false);
+      layer.permissions=structuredClone(permissions);
+    }
+    return ctx;
+  }
+
+  private subjectsAdmin(subject:string,ctx?:PermissionContext) {
+    const principal=this.get(subject);
+    return activeCaller(principal) && this.principalAdmin(principal) &&
+      (ctx ?? []).every(layer=>!layer.permissions && layer.subjects.every(id=>this.principalAdmin(this.get(id)!)));
+  }
+
+  contextAdmin(actor:string,ctx?:PermissionContext) {
+    this.validateContext(actor,ctx);
+    return this.subjectsAdmin(actor,ctx);
+  }
+
+  private subjectAllows(actor:string,subject:string,ctx:PermissionContext|undefined,target:string,capability:Capability,method?:string,data?:unknown) {
+    if (capability==='methods' && target==='~' && (method?.startsWith('$.runners.') || method?.startsWith('runners.')) &&
+        !this.subjectsAdmin(subject,ctx)) return false;
+    return this.principalAllows(subject,target,capability,method,data) &&
+      (ctx ?? []).every(layer=>this.layerAllows(actor,layer,target,capability,method,data));
+  }
+
+  contextAllows(actor:string,ctx:PermissionContext|undefined,target:string,capability:Capability,method?:string,data?:unknown) {
+    this.validateContext(actor,ctx);
+    return this.subjectAllows(actor,actor,ctx,target,capability,method,data);
+  }
+
+  checkPermissions(actor:string,params:any,ctx?:PermissionContext,ceiling?:ReturnType<typeof filesystemProfile>) {
+    this.validateContext(actor,ctx);
+    const caller=this.get(actor);
+    if (!activeCaller(caller)) throw Error('Permission denied');
+    try { this.profileFor(caller); } catch { throw Error('Permission denied'); }
+    const subject=params?.subject===undefined ? actor : params.subject;
+    if (typeof subject!=='string') throw Error('Permission denied');
+    if (subject!==actor) this.authorizeSubject(actor,ctx ?? [],subject);
+    const action=params?.action;
+    if (!action || typeof action!=='object' || Array.isArray(action)) throw Error('Expected a permission action');
+    const {type,node}=action;
+    if (['network','read','write'].includes(type)) {
+      const view=this.subjectFileSnapshot(actor,subject,ctx,actor===subject ? ceiling : undefined);
+      if (type==='network') return {allowed:view.sandbox?.network ?? true};
+      if (typeof action.path!=='string' || !action.path.startsWith('/')) throw Error('Expected an absolute path');
+      return {allowed:view.allows(action.path,type==='write')};
+    }
+    if (type==='http') return {allowed:this.subjectAllows(actor,subject,ctx,subject,'http')};
+    if (typeof node!=='string' || !node) throw Error('Expected an action node');
+    switch (type) {
+      case 'call': {
+        if (typeof action.method!=='string' || !action.method) throw Error('Expected an action method');
+        const data=normalizeCallData(action.method,action.data,this.get(node)?.type);
+        return {allowed:this.subjectAllows(actor,subject,ctx,node,'methods',action.method,data)};
+      }
+      case 'cli':
+        if (typeof action.method!=='string' || !action.method) throw Error('Expected a CLI method');
+        return {allowed:this.subjectAllows(actor,subject,ctx,node,'cli',action.method,action.input===undefined ? {} : action.input)};
+      case 'event':
+        if (typeof action.event!=='string' || !action.event) throw Error('Expected an event name');
+        return {allowed:this.subjectAllows(actor,subject,ctx,node,'events',action.event,action.data)};
+      case 'help': case 'discover': return {allowed:this.subjectAllows(actor,subject,ctx,node,'discover')};
+      case 'delivery': return {allowed:this.subjectAllows(actor,subject,ctx,node,'delivery')};
+      case 'checkPermissions': {
+        if (node===subject) return {allowed:true};
+        if (!this.subjectAllows(actor,subject,ctx,node,'checkPermissions')) return {allowed:false};
+        try { this.restrictionSubject(node); } catch { return {allowed:false}; }
+        return {allowed:true};
+      }
+      default: throw Error('Unknown permission action');
+    }
+  }
+
   getSubscriptions(id:string): any[] {
     const row=this.db.prepare('SELECT rules FROM personal_subscriptions WHERE node=?').get(id);
     return row ? JSON.parse(String(row.rules)) : [];
@@ -344,10 +499,10 @@ export class Store {
     if(type==='profile') names.push('$.profile.scope.get','$.profile.scope.set');
     return names;
   }
-  manage(actorId:string,id:string,method:string,data:any): {handled:boolean;result?:any;changed?:boolean} {
+  manage(actorId:string,id:string,method:string,data:any,ctx?:PermissionContext): {handled:boolean;result?:any;changed?:boolean} {
     const node=this.get(id);
     if(!node || !this.managementNames(node.type).includes(method)) return {handled:false};
-    if(!this.allows(actorId,id,method,data)) throw Error('Permission denied');
+    if(!this.contextAllows(actorId,ctx,id,'methods',method,data)) throw Error('Permission denied');
     let result:any={};
     let changed:boolean|undefined;
     if (method==='$.node.get') result={id,parentId:node.parentId,type:node.type,name:node.name,status:node.status};
@@ -381,7 +536,8 @@ export class Store {
     return {handled:true,result,...(changed!==undefined && {changed})};
   }
 
-  visible(actorId: string): DirectoryEntry[] {
+  visible(actorId: string, ctx?:PermissionContext): DirectoryEntry[] {
+    this.validateContext(actorId,ctx);
     const actor=this.get(actorId);
     if(!activeCaller(actor)) return [];
     if (actor.profile) { try { this.profileFor(actor); } catch { return []; } }
@@ -391,11 +547,18 @@ export class Store {
       index.set(n.id,{...n,permissions:JSON.parse(n.permissions)});
     }
     const lookup=(id:string)=>index.get(id);
-    const owners=this.paths(actor).map(chain=>chain.map(owner=>({rules:owner.permissions,ids:lineage(owner,lookup).map(n=>n.id)})));
+    const ownerPath=(owner:PolicyNode)=>({rules:owner.permissions,ids:lineage(owner,lookup).map(n=>n.id)});
+    const paths=(subject:NodeRecord)=>({id:subject.id,paths:this.paths(subject).map(chain=>chain.map(ownerPath))});
+    const subjects=[paths(actor)];
+    for (const layer of ctx ?? []) {
+      for (const id of layer.subjects) subjects.push(paths(this.get(id)!));
+      if (layer.permissions) subjects.push({id:actorId,paths:[[{...ownerPath(actor),rules:layer.permissions}]]});
+    }
     const entries=new Map<string,DirectoryEntry>();
     for(const node of index.values()) {
       const chain=lineage(node,lookup), ids=chain.map(n=>n.id);
-      if(!owners.some(path=>path.every(o=>allowsAtLevel(o.rules,o.ids,ids,node.type,actorId,undefined,'discover',undefined,undefined,this.member)))) continue;
+      if(!subjects.every(subject=>subject.paths.some(path=>path.every(o=>
+        allowsAtLevel(o.rules,o.ids,ids,node.type,subject.id,undefined,'discover',undefined,undefined,this.member))))) continue;
       for(const n of chain.reverse()) if(!entries.has(n.id)) {
         const {id,parentId,type,name,status}=n;
         entries.set(id,{id,parentId,type,name,...(['app','user','profile'].includes(type)?{status}:{})});
