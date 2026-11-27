@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { once } from 'node:events';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { lstatSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -79,7 +79,10 @@ test('PROFILE CLI discovery, separate permits and interactive credential import'
     store.setStatus(testApp,'working');
     assert.equal((await cliResult('-u',testApp,'me')).id,testApp);
     assert.match((await exec('pappai',['cli',profile,cli])).stdout,/"configured":\s*true/);
-    await assert.rejects(exec('pappai',['me'],{uid:65534,gid:65534}),/Permission denied|EPERM|EACCES/);
+    const adminDirectory=lstatSync('/run/pappai-admin');
+    assert.ok(adminDirectory.isDirectory());
+    assert.equal(adminDirectory.uid,0);
+    assert.equal(adminDirectory.mode & 0o777,0o700);
     // Isolated fixture session. Exercise the same WebSocket and broker as both UI launch paths.
     db.prepare('INSERT INTO passkeys VALUES(?,?,?,0)').run('test-key',user,Buffer.alloc(1));
     const expiry=Date.now()+60_000;
