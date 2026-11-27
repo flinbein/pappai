@@ -8,7 +8,9 @@ Use **Edit as rows** to enter individual arguments, including empty strings. In 
 
 A node can advertise an interactive action in its help with `type:"cli"`. Open that action to see its terminals, select **+** to read its manual and input schema, then choose **Run**. The form validates the arguments and environment against the feature's schema. On the main **Terminal** page these sessions appear in groups by node and action. The group label shows the method followed by the node name. Expand it to see its sessions inside a colored outline. Swipes skip collapsed groups. Groups slide open and closed. Closing a tab slides the remaining tabs into place. Both transitions respect the system’s reduced motion setting. Collapsing the active session's group selects **+** and keeps its sessions running. Closing a starting or running session, or a group containing one, requires confirmation. [Try interactive Codex login](codex.md)
 
-In a terminal, `pappai discover` lists visible nodes and `pappai help --doc NODE_ID` displays their help. Use `pappai call NODE_ID METHOD '{}'` to call a method and `pappai cli NODE_ID FEATURE` for an interactive action. These commands use the signed-in USER's permissions. [Command reference](dev/terminal-cli.md)
+Run `pappai me` to see the calling node's ID, parent ID, type and name. A sandboxed shell acts as the signed-in USER. An unrestricted root shell acts as the workspace (`~`), including when opened from the web. In that shell, `pappai -u NODE_ID me` selects a working USER or APP for one command. A sandbox cannot select another identity.
+
+`pappai discover` lists visible nodes and `pappai help --doc NODE_ID` displays their help. Use `pappai call NODE_ID METHOD '{}'` to call a method and `pappai cli NODE_ID FEATURE` for an interactive action. An action can have narrower RPC access than its caller. [Command reference](dev/terminal-cli.md)
 
 Choose a theme on **+**, or use **🎨** in the tools row to change the active terminal. The theme colors its ANSI output, tab and toolbar. The browser remembers the last choice for new terminals. Each open tab keeps its own theme.
 

@@ -10,7 +10,8 @@ import termios
 import tty
 
 
-USAGE = """Usage:
+USAGE = """Usage (local administrators may prefix any command with -u NODE_ID):
+  pappai me
   pappai call NODE METHOD [JSON]
   pappai help [--schema] [--doc] NODE [FEATURE]
   pappai discover [JSON]
@@ -24,6 +25,8 @@ def request(args):
         print(USAGE)
         sys.exit(0)
     op, *args = args
+    if op == 'me' and not args:
+        return op, {}
     if op == 'cli' and len(args) >= 3 and args[2] == '--':
         return op, {'node': args[0], 'method': args[1], 'input': {'args': args[3:]}}
     if op in ('call', 'cli') and len(args) in (2, 3):
@@ -111,13 +114,18 @@ def relay(sock, size):
 
 
 def main():
-    method, params = request(sys.argv[1:])
-    path = os.environ.get('PAPPAI_TERMINAL_SOCKET')
-    token = os.environ.get('PAPPAI_TERMINAL_TOKEN')
-    if not path or not token:
-        raise ValueError('Open a pappai web terminal to run this command')
+    args = sys.argv[1:]
+    identity = {}
+    if args[:1] == ['-u']:
+        if len(args) < 3 or not args[1]:
+            raise ValueError('Expected -u NODE_ID COMMAND')
+        identity = {'asNode': args[1]}
+        args = args[2:]
+    method, params = request(args)
+    terminal = '/run/pappai/terminal.sock'
+    path = terminal if os.path.exists(terminal) else '/run/pappai-admin/rpc.sock'
     cols, rows = size = geometry()
-    message = json.dumps({'method': method, 'params': params, 'token': token, 'cols': cols, 'rows': rows}).encode()
+    message = json.dumps({'method': method, 'params': params, **identity, 'cols': cols, 'rows': rows}).encode()
     if len(message) > 65536:
         raise ValueError('Terminal request is too large')
     with socket.socket(socket.AF_UNIX) as sock:

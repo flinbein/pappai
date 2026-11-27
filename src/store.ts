@@ -57,7 +57,7 @@ function lineage<T extends PolicyNode>(node: T, get: (id: string) => T | undefin
 }
 
 function activeCaller(node: PolicyNode | undefined): node is PolicyNode {
-  return !!node && (node.type === 'user' || node.type === 'app') && node.status === 'working';
+  return !!node && (node.type === 'user' || node.type === 'app' || node.id === '~') && node.status === 'working';
 }
 
 export class Store {
@@ -264,7 +264,7 @@ export class Store {
 
   private principalFilePolicies(id:string) {
     const node=this.get(id);
-    if (!node || (node.type !== 'app' && node.type !== 'user')) throw Error('Unknown filesystem principal');
+    if (!node || (node.type !== 'app' && node.type !== 'user' && id !== '~')) throw Error('Unknown filesystem principal');
     this.profileFor(node);
     return this.filePolicies(node);
   }

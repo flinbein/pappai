@@ -8,7 +8,7 @@ export function initTempRoot() {
   return process.env.PAPPAI_TEMP_ROOT ||= mkdtempSync(join(tmpdir(), 'pappai-apps-'));
 }
 export function sandboxPrivateTmp(id:string) {
-  if (!/^[a-zA-Z0-9_-]+$/.test(id)) throw Error('Invalid temporary directory owner');
+  if (id !== '~' && !/^[a-zA-Z0-9_-]+$/.test(id)) throw Error('Invalid temporary directory owner');
   const root=initTempRoot();
   mkdirSync(root,{recursive:true,mode:0o700});
   const path=join(root,id);
@@ -46,7 +46,7 @@ function buildSandboxArgs(job: SandboxJob, terminal?: TerminalMounts): string[] 
   const {sandbox, settings} = job;
   if (process.platform !== 'linux' || !sandbox || typeof sandbox.network !== 'boolean' ||
       !Array.isArray(sandbox.read) || !Array.isArray(sandbox.write)) throw new Error('unsupported sandbox profile');
-  if (!/^[a-zA-Z0-9_-]+$/.test(job.appId)) throw new Error('invalid APP id');
+  if (!(terminal && job.appId === '~') && !/^[a-zA-Z0-9_-]+$/.test(job.appId)) throw new Error('invalid APP id');
   checkPath(settings.cwd);
   if (!lstatSync(settings.cwd).isDirectory()) throw new Error('working directory must be a directory');
   const mounts = new Map<string, string>();

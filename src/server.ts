@@ -191,7 +191,15 @@ export function createService({ db, origin, webRoot = process.env.PAPPAI_WEB_ROO
   });
   const terminals = attachTerminals(server, address, store, auth.user, {
     prepareCli:runner.prepareCli.bind(runner),
-    rpc:async (actor,method,params,view,signal)=>rpc(actor,method,params,signal,view),
+    rpc:async (actor,method,params,view,signal)=>{
+      if (method==='me') {
+        const node=store.get(actor);
+        if (!node) throw Error('Unknown terminal identity');
+        const {id,parentId,type,name}=node;
+        return {id,parentId,type,name};
+      }
+      return rpc(actor,method,params,signal,view);
+    },
   });
   const events = attachEvents(server,address,store,auth.user,controller);
   async function close() {
@@ -205,7 +213,7 @@ export function createService({ db, origin, webRoot = process.env.PAPPAI_WEB_ROO
     sockets.close();
     await closed;
   }
-  return { server, store, controller, runner, initialized, close };
+  return { server, store, controller, runner, initialized, close, enableAdminCli:terminals.enableAdmin };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
@@ -216,6 +224,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   const db = new DatabaseSync(file);
   const app = createService({ db, origin });
   await app.initialized;
+  if (process.platform==='linux' && process.getuid?.()===0) await app.enableAdminCli();
   app.server.listen(port, process.env.HOST ?? '127.0.0.1', () => console.log('pappai', origin));
   let stopping = false;
   async function shutdown() {

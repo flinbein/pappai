@@ -8,7 +8,7 @@ import { WebSocket, WebSocketServer } from 'ws';
 import type { Store } from './store.ts';
 import { sandboxPrivateTmp, terminalSandboxArgs } from './sandbox.ts';
 import { isWebRpcSocket } from './events.ts';
-import { controlFrame, terminalBroker, type BrokerRequest } from './terminal-broker.ts';
+import { adminBroker, controlFrame, terminalBroker, type BrokerRequest } from './terminal-broker.ts';
 import { openRegularFile } from './file-view.ts';
 import { fileLevel } from './permits.ts';
 
@@ -17,7 +17,7 @@ const limit = 1024 * 1024;
 type SessionUser = (req: IncomingMessage, touch?: boolean, expectedBrowserSession?: string) => string | null;
 const validDimension = (n: unknown) => typeof n === 'number' && Number.isInteger(n) && n >= 1 && n <= 1000;
 export type TerminalView = ReturnType<Store['fileSnapshot']> & {scratch?: {source: string; path: string}; revoked?: boolean};
-type CliAction = {files: string[]; argv: string[]; env?: Record<string,string>};
+type CliAction = {files: string[]; argv: string[]; env?: Record<string,string>; node?:string; calls?:string[]};
 export type TerminalHooks = {
   prepareCli(actor: string, node: string, method: string, input: any, signal: AbortSignal): Promise<CliAction>;
   rpc(actor: string, method: string, params: any, view: TerminalView, signal: AbortSignal): Promise<any>;
@@ -111,8 +111,10 @@ function launch(context: TerminalContext, command: Command, cols: number, rows: 
     if (scratchMountpoint) { try { rmdirSync(scratchMountpoint); } catch {} }
   }
   try {
-    if (hooks) broker = terminalBroker(() => !active.aborted && authorized(), async (request, socket, connectionSignal) => {
+    if (sandbox && hooks && (!action || action.calls?.length)) broker = terminalBroker(() => !active.aborted && authorized(), async (request, socket, connectionSignal) => {
       const requestSignal = AbortSignal.any([active, connectionSignal]);
+      if (action && request.method !== 'me' && !(request.method === 'call' && request.params?.node === action.node &&
+          action.calls?.includes(request.params?.method))) throw Error('Operation outside the CLI launch permissions');
       if (request.method !== 'cli') {
         const result = await hooks.rpc(actor, request.method, request.params ?? {}, view, requestSignal);
         if (!requestSignal.aborted && authorized()) socket.end(controlFrame({result: result ?? null}));
@@ -134,8 +136,6 @@ function launch(context: TerminalContext, command: Command, cols: number, rows: 
     }
     checkCommand(command);
     const childEnv = {...command.env,
-      ...(broker && {PAPPAI_TERMINAL_SOCKET: sandbox ? '/run/pappai/terminal.sock' : broker.path,
-        PAPPAI_TERMINAL_TOKEN: broker.secret}),
       ...(view.scratch && {PAPPAI_CLI_TMP: view.scratch.path})};
     const data = Buffer.from(JSON.stringify({...command, env: childEnv}));
     if (data.length > 65536) throw Error('Terminal command is too long');
@@ -258,6 +258,9 @@ export function attachTerminals(server: Server, address: URL, store: Store, user
   const wss = new WebSocketServer({noServer: true, maxPayload: 65536, perMessageDeflate: false});
   const terminals = new Map<WebSocket, {valid(): boolean; done: Promise<void>}>();
   let closing = false;
+  let admin: Awaited<ReturnType<typeof adminBroker>> | undefined;
+  const localChildren = new Set<Promise<void>>();
+  const localLife = new AbortController();
 
   server.on('upgrade', (req, socket, head) => {
     if (isWebRpcSocket(req.url)) return;
@@ -329,15 +332,43 @@ export function attachTerminals(server: Server, address: URL, store: Store, user
     });
   });
   return {
+    async enableAdmin() {
+      if (!hooks) throw Error('Administrator RPC requires terminal hooks');
+      admin = await adminBroker(async (request,socket,connectionSignal) => {
+        const actor = request.asNode ?? '~';
+        const valid = () => {
+          const node = store.get(actor);
+          return !closing && node?.status === 'working' && (actor === '~' || node.type === 'user' || node.type === 'app');
+        };
+        if (!valid()) throw Error('Expected an active USER or APP');
+        const {node,method} = request.params ?? {};
+        console.info('Local administrator RPC', JSON.stringify({administrator:'~',actor,operation:request.method,
+          node:typeof node==='string' ? node.slice(0,256) : undefined,
+          feature:typeof method==='string' ? method.slice(0,256) : undefined}));
+        const signal = AbortSignal.any([localLife.signal,connectionSignal]);
+        const view = store.fileSnapshot(actor);
+        if (request.method === 'cli') {
+          const context = {store,actor,hooks,authorized:valid,signal,forceSandbox:false,children:localChildren,
+            depth:1,budget:{preparing:0}};
+          await relayNested(context,request,socket,JSON.stringify(view.sandbox));
+        } else {
+          const result = await hooks.rpc(actor,request.method,request.params ?? {},view,signal);
+          if (valid() && !signal.aborted) socket.end(controlFrame({result:result ?? null}));
+          else socket.destroy();
+        }
+      });
+    },
     checkSessions() {
       for (const [ws, terminal] of terminals) if (!terminal.valid()) ws.terminate();
     },
     async close() {
       closing = true;
+      localLife.abort();
+      admin?.close();
       const pending = Array.from(terminals.values(), terminal => terminal.done);
       for (const ws of wss.clients) ws.terminate();
       wss.close();
-      await Promise.all(pending);
+      await Promise.all([...pending,...localChildren]);
     },
   };
 }

@@ -507,7 +507,7 @@ export class Controller {
     const {event,data,version,to,delivery='none'} = params;
     const app = this.store.get(actor);
     if (typeof event !== 'string' || !/^[\w-]+(?:\.[\w-]+)*$/.test(event) || !app ||
-        !['app','user'].includes(app.type) || (app.status !== 'working' && (!worker || this.workers.get(worker.id) !== worker)))
+        !['app','user','workspace'].includes(app.type) || (app.status !== 'working' && (!worker || this.workers.get(worker.id) !== worker)))
       throw Error('Invalid event publication');
     if (app.type === 'app') {
       const feature = this.config(actor).features.get(event);

@@ -74,6 +74,9 @@ export function cliLaunchPlan(root:string,name:string,reply:unknown) {
   if (reply.env!==undefined && (!record(reply.env) || !Object.entries(reply.env).every(([key,value])=>
     /^[A-Za-z_][A-Za-z0-9_]*$/.test(key) && !key.startsWith('PAPPAI_') && typeof value==='string' && !value.includes('\0'))))
     throw Error('Invalid CLI environment');
+  if (reply.calls!==undefined && (!Array.isArray(reply.calls) || reply.calls.length>64 ||
+      !reply.calls.every(key=>typeof key==='string' && featureName.test(key)))) throw Error('Invalid PROFILE CLI calls');
   return {files:reply.files.map(file=>checkedEntrypoint(root,name,file)),argv:reply.argv as string[],
+    calls:reply.calls as string[]|undefined,
     ...(reply.env && {env:reply.env as Record<string,string>})};
 }

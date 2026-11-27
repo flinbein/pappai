@@ -1,6 +1,5 @@
-import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { mkdtempSync, rmdirSync } from 'node:fs';
-import { createServer, type Socket } from 'node:net';
+import { lstatSync, mkdirSync, mkdtempSync, rmdirSync, unlinkSync } from 'node:fs';
+import { connect, createServer, type Socket } from 'node:net';
 
 const maxRequest = 65536;
 export function controlFrame(value: object) {
@@ -10,13 +9,11 @@ export function controlFrame(value: object) {
   return Buffer.concat([header, data]);
 }
 
-export type BrokerRequest = {method: string; params: any; cols?: number; rows?: number};
-export function terminalBroker(authorized: () => boolean,
-  handle: (request: BrokerRequest, socket: Socket, signal: AbortSignal) => Promise<void>) {
-  const directory = mkdtempSync('/run/pappai-terminal-');
-  const path = directory + '/socket';
-  const secret = randomBytes(32).toString('hex');
-  const expected = Buffer.from(secret);
+export type BrokerRequest = {method: string; params: any; cols?: number; rows?: number; asNode?: string};
+type Handler = (request: BrokerRequest, socket: Socket, signal: AbortSignal) => Promise<void>;
+export function terminalBroker(authorized: () => boolean, handle: Handler, adminPath?: string) {
+  const directory = adminPath ? undefined : mkdtempSync('/run/pappai-terminal-');
+  const path = adminPath ?? directory + '/socket';
   const sockets = new Set<Socket>();
   const server = createServer(socket => {
     sockets.add(socket);
@@ -39,10 +36,10 @@ export function terminalBroker(authorized: () => boolean,
       let request;
       try {
         request = JSON.parse(body.toString());
-        const supplied = Buffer.from(typeof request.token === 'string' ? request.token : '');
-        if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected) || !authorized())
-          throw Error('Terminal session expired');
-        if (!['call','help','discover','publish','cli'].includes(request.method))
+        if (!authorized()) throw Error('Terminal session expired');
+        if ('asNode' in request && (!adminPath || typeof request.asNode !== 'string' || !request.asNode))
+          throw Error('Changing identity requires the local administrator socket');
+        if (!['me','call','help','discover','publish','cli'].includes(request.method))
           throw Error('Unknown terminal RPC method');
       } catch (error) {
         socket.end(controlFrame({error: (error as Error).message}));
@@ -62,10 +59,40 @@ export function terminalBroker(authorized: () => boolean,
     if (closed) return;
     closed = true;
     for (const socket of sockets) socket.destroy();
-    server.close(() => { try { rmdirSync(directory); } catch {} });
+    server.close(() => { if (directory) { try { rmdirSync(directory); } catch {} } });
   }
   server.on('error', close);
+  const ready = new Promise<void>((resolve,reject) => {
+    server.once('listening',resolve);
+    server.once('error',reject);
+  });
+  void ready.catch(() => {}); // Synchronous sandbox launches also fail closed if the mount is unavailable.
   try { server.listen(path); }
   catch (error) { close(); throw error; }
-  return {path, secret, close};
+  return {path, ready, close};
+}
+
+export async function adminBroker(handle: Handler) {
+  const directory = '/run/pappai-admin';
+  if (process.getuid?.() !== 0) throw Error('Local administrator socket requires root');
+  mkdirSync(directory, {recursive:true, mode:0o700});
+  const dir = lstatSync(directory);
+  if (!dir.isDirectory() || dir.uid !== 0 || (dir.mode & 0o777) !== 0o700)
+    throw Error('Expected a private root-owned administrator socket directory');
+  const path = directory + '/rpc.sock';
+  const old = lstatSync(path,{throwIfNoEntry:false});
+  if (old) {
+    if (!old.isSocket() || old.uid !== 0) throw Error('Unexpected administrator socket file');
+    const stale = await new Promise<boolean>((resolve,reject) => {
+      const probe = connect(path);
+      probe.once('connect',() => { probe.destroy(); resolve(false); });
+      probe.once('error',error => (error as NodeJS.ErrnoException).code === 'ECONNREFUSED' ? resolve(true) : reject(error));
+    });
+    const current = lstatSync(path);
+    if (!stale || old.ino !== current.ino || old.dev !== current.dev) throw Error('Administrator socket already in use');
+    unlinkSync(path);
+  }
+  const broker = terminalBroker(() => true,handle,path);
+  await broker.ready;
+  return broker;
 }

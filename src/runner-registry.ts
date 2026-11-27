@@ -49,7 +49,10 @@ export class RunnerRegistry extends EventEmitter {
     if (!permitted()) throw Error('Permission denied');
     if (this.closing || this.hosts.get(name)!==host || !this.available(name) || signal?.aborted)
       throw Error('CLI launch cancelled');
-    return cliLaunchPlan(this.root,name,reply);
+    const plan=cliLaunchPlan(this.root,name,reply);
+    // Existing authorization helpers import credentials and then display status.
+    const calls=plan.calls ?? (key==='authorize' ? ['setup','status'] : []);
+    return {...plan, calls:calls.map(key=>name+'.'+key), node};
   }
   profileCall(actor:string,profileId:string,method:string,data:unknown,workerId?:string,signal?:AbortSignal,timeoutMs?:number,callerView?:FileView) {
     return this.profiles.call(actor,profileId,method,data,workerId,signal,timeoutMs,callerView);
