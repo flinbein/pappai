@@ -261,6 +261,36 @@ async function touchStroke(page, selector, dx, dy, fingers = 1, holdMs = 0) {
   }
 }
 
+async function checkLegacyWorkerReload(owner, first) {
+  const viewer = await owner.context().newPage();
+  // A page opened after a static release can still be attached to a live
+  // worker from before registry IDs were introduced. Keep its real PTYs and
+  // document locks, and expose the earlier wire format to this page.
+  await viewer.addInitScript(() => {
+    const descriptor = Object.getOwnPropertyDescriptor(MessageEvent.prototype, 'data');
+    Object.defineProperty(MessageEvent.prototype, 'data', {...descriptor, get() {
+      const message = descriptor.get.call(this);
+      if (message?.type !== 'terminal.registry') return message;
+      const {worker, ...legacy} = message;
+      return legacy;
+    }});
+  });
+  try {
+    await viewer.goto(origin+'/terminal');
+    const id = await first.getAttribute('data-terminal');
+    const tab = viewer.locator('.terminal-tab[data-terminal="'+id+'"]');
+    await tab.click();
+    await viewer.waitForFunction(id => history.state?.pappaiView?.terminal?.id === Number(id), id);
+    await viewer.reload();
+    await tab.and(viewer.locator('[aria-selected=true]')).waitFor();
+    await viewer.locator('.terminal-frame:not([hidden]) .xterm-rows').getByText('sharedhistory',{exact:true}).waitFor();
+    console.log('PASS: selected terminal and its scrollback survive reload with a legacy registry');
+  } finally {
+    await viewer.close();
+    await owner.bringToFront();
+  }
+}
+
 async function checkSharedTerminal(owner, first, second, socket) {
   const viewer = await owner.context().newPage();
   const firstId = await first.getAttribute('data-terminal');
@@ -785,6 +815,7 @@ try {
   assert.equal(sockets().length, 2);
   await direct.command("printf 'shared%s\\n' history");
   await activeRows.getByText('sharedhistory',{exact:true}).waitFor();
+  await checkLegacyWorkerReload(directTab,direct.tab);
   await checkSharedTerminal(directTab,direct.tab,second.tab,sockets()[0]);
   assert.equal(sockets().length, 2, 'Opening a viewer, switching control and reloading must preserve both PTYs');
   const secondaryClosed = once(sockets()[1].client,'close');
